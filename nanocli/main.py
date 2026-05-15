@@ -21,6 +21,8 @@ app.command(name="review")(review)
 app.command(name="debug")(debug)
 app.command(name="test")(test)
 app.add_typer(memory_app, name="memory")
+app.command(name="plan")(plan)
+app.command(name="patch")(patch)
 
 @app.callback()
 def callback():
