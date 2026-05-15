@@ -1,6 +1,12 @@
 # Product Requirements Document
 # NanoCLI: Local AI Coding Assistant berbasis CLI dengan Project Memory
 
+**Versi:** PRD Final Detail Qwen3.5 Strategy
+**Tanggal:** 15 Mei 2026
+**Model utama:** qwen3.5:4b-q4_K_M
+**Model deep:** qwen3.5:9b-q4_K_M
+**Model memory:** nomic-embed-text
+
 ## 1. Ringkasan Produk
 
 NanoCLI adalah aplikasi Command Line Interface berbasis Python untuk membantu pekerjaan coding harian menggunakan model LLM lokal melalui Ollama. Produk ini dirancang untuk laptop dengan spesifikasi menengah, yaitu Intel Core i5-11400H, RAM 16 GB, dan NVIDIA RTX 3050 Laptop 4GB VRAM.
@@ -89,11 +95,77 @@ Karena itu, NanoCLI harus memakai strategi berikut.
 4. File panjang diringkas sebelum dikirim ke model.
 5. Project Memory digunakan untuk mengambil konteks relevan, bukan memasukkan seluruh proyek ke prompt.
 
-## 7. Rekomendasi Model Final
+## 7. Rekomendasi Model Final Berbasis Qwen3.5
+
+Strategi model NanoCLI diperbarui agar lebih mengutamakan Qwen3.5. Alasan utamanya adalah Qwen3.5 memiliki context window besar, dukungan multimodal pada varian tertentu, mode thinking, dan kemampuan agentic yang lebih baik untuk workflow coding modern.
+
+Namun, karena target hardware hanya memiliki RTX 3050 Laptop 4GB VRAM dan RAM 16 GB, NanoCLI tidak boleh memakai semua kemampuan context Qwen3.5 secara penuh. Context window 256K tetap harus dikontrol melalui `num_ctx`, context compaction, dan retrieval Project Memory.
 
 ### 7.1 Model Default Harian
 
 Model default yang dipilih:
+
+```bash
+qwen3.5:4b-q4_K_M
+```
+
+Alasan:
+
+1. Ukuran sekitar 3.4 GB sehingga masih masuk akal untuk laptop dengan RTX 3050 4GB.
+2. Mendukung context window 256K, tetapi NanoCLI tetap membatasi context runtime agar tidak membebani VRAM.
+3. Mendukung input text dan image, sehingga dapat dikembangkan untuk analisis screenshot atau diagram di masa depan.
+4. Lebih baru dibanding Qwen2.5-Coder dan lebih cocok untuk agentic CLI yang butuh planning, tool-style prompt, dan long-context workflow.
+5. Cocok sebagai default untuk `ask`, `chat`, `review`, `debug`, `test`, `plan`, dan memory-aware command.
+
+Catatan penting:
+
+Qwen3.5 tidak boleh dipaksa memakai context 256K di laptop target. Untuk harian, NanoCLI harus memakai context efektif sekitar 8K sampai 16K. Mode 32K hanya dipakai saat diperlukan dan harus memberi peringatan memori.
+
+### 7.2 Model Cepat
+
+Model cepat yang direkomendasikan:
+
+```bash
+qwen3.5:2b-q4_K_M
+```
+
+Alasan:
+
+1. Lebih ringan daripada 4B.
+2. Cocok untuk prompt pendek.
+3. Cocok ketika laptop sedang menjalankan banyak aplikasi.
+4. Cocok untuk `ask`, `chat`, command bantuan singkat, dan ringkasan kecil.
+
+Batasan:
+
+1. Kurang kuat untuk review kode kompleks.
+2. Tidak direkomendasikan untuk patch besar.
+3. Tidak ideal untuk analisis arsitektur.
+
+### 7.3 Model Deep Review Lokal
+
+Model deep review lokal:
+
+```bash
+qwen3.5:9b-q4_K_M
+```
+
+Alasan:
+
+1. Lebih kuat untuk reasoning dan instruksi panjang.
+2. Cocok untuk review arsitektur, refactor besar, debugging rumit, dan analisis multi-file.
+3. Masih mungkin dijalankan di RAM 16 GB, tetapi kemungkinan lebih lambat karena model sekitar 6.6 GB dan VRAM hanya 4GB.
+
+Batasan:
+
+1. Tidak dijadikan default.
+2. Hanya dipakai saat pengguna memberi opsi `--deep`.
+3. Harus memakai context compaction.
+4. Harus memberi peringatan jika RAM bebas rendah.
+
+### 7.4 Fallback Coding-Specific
+
+Model fallback coding-specific:
 
 ```bash
 qwen2.5-coder:3b
@@ -101,46 +173,20 @@ qwen2.5-coder:3b
 
 Alasan:
 
-1. Ukuran ringan untuk RTX 3050 4GB.
-2. Fokus pada coding.
-3. Cukup cepat untuk ask, review kecil, debug ringan, dan pembuatan unit test sederhana.
-4. Lebih cocok sebagai default daripada model 7B untuk pemakaian harian.
+1. Model ini memang dibuat khusus untuk coding.
+2. Berguna jika Qwen3.5 4B memberi jawaban terlalu umum.
+3. Cocok untuk generate fungsi, review file kecil, dan unit test sederhana.
+4. Lebih stabil untuk tugas coding murni yang tidak membutuhkan multimodal atau long-context besar.
 
-### 7.2 Model Deep Review Opsional
-
-Model opsional untuk analisis lebih serius:
+Model deep fallback coding-specific:
 
 ```bash
 qwen2.5-coder:7b
 ```
 
-Alasan:
+Digunakan hanya jika pengguna memilih mode coding-specific deep review.
 
-1. Lebih kuat untuk reasoning kode.
-2. Cocok untuk review arsitektur, refactor, dan unit test kompleks.
-3. Tetap masih mungkin dijalankan di RAM 16 GB, tetapi tidak dijadikan default karena ukurannya lebih berat.
-
-Batasan:
-
-1. Bisa lebih lambat.
-2. Bisa memakai RAM sistem karena VRAM 4GB terbatas.
-3. Harus digunakan dengan context terbatas.
-
-### 7.3 Model Fallback Cepat
-
-Model fallback:
-
-```bash
-qwen2.5-coder:1.5b
-```
-
-Alasan:
-
-1. Sangat ringan.
-2. Cocok untuk laptop sedang sibuk.
-3. Cocok untuk prompt sederhana, command cepat, dan penjelasan pendek.
-
-### 7.4 Model Embedding untuk Project Memory
+### 7.5 Model Embedding untuk Project Memory
 
 Model embedding:
 
@@ -150,23 +196,59 @@ nomic-embed-text
 
 Fungsi:
 
-1. Mengubah ringkasan file, potongan kode, dan catatan proyek menjadi embedding.
+1. Mengubah ringkasan file, potongan kode, catatan bug, dan keputusan teknis menjadi embedding.
 2. Membantu pencarian konteks relevan.
-3. Mendukung sistem memory lokal.
+3. Mendukung sistem Project Memory lokal.
+4. Tidak digunakan untuk chat karena model ini hanya untuk embedding.
 
-### 7.5 Kebijakan Pemilihan Model
+### 7.6 Kebijakan Pemilihan Model
 
-| Kebutuhan | Model |
-|---|---|
-| Prompt cepat | qwen2.5-coder:3b |
-| Chat harian | qwen2.5-coder:3b |
-| Review file kecil | qwen2.5-coder:3b |
-| Debug ringan | qwen2.5-coder:3b |
-| Unit test sederhana | qwen2.5-coder:3b |
-| Review arsitektur | qwen2.5-coder:7b |
-| Analisis error rumit | qwen2.5-coder:7b |
-| Laptop sedang berat | qwen2.5-coder:1.5b |
-| Index memory | nomic-embed-text |
+| Kebutuhan | Model Utama | Alternatif |
+|---|---|---|
+| Prompt cepat | qwen3.5:2b-q4_K_M | qwen2.5-coder:1.5b |
+| Chat harian | qwen3.5:4b-q4_K_M | qwen2.5-coder:3b |
+| Review file kecil | qwen3.5:4b-q4_K_M | qwen2.5-coder:3b |
+| Debug ringan | qwen3.5:4b-q4_K_M | qwen2.5-coder:3b |
+| Unit test sederhana | qwen3.5:4b-q4_K_M | qwen2.5-coder:3b |
+| Plan fitur | qwen3.5:4b-q4_K_M | qwen3.5:9b-q4_K_M |
+| Review arsitektur | qwen3.5:9b-q4_K_M | qwen2.5-coder:7b |
+| Analisis error rumit | qwen3.5:9b-q4_K_M | qwen2.5-coder:7b |
+| Patch kecil | qwen3.5:4b-q4_K_M | qwen2.5-coder:3b |
+| Patch kompleks | qwen3.5:9b-q4_K_M | qwen2.5-coder:7b |
+| Index memory | nomic-embed-text | none |
+
+### 7.7 Model yang Tidak Direkomendasikan untuk Laptop Target
+
+Model berikut tidak direkomendasikan untuk penggunaan lokal harian pada RAM 16 GB dan VRAM 4GB.
+
+1. `qwen3.5:27b`
+2. `qwen3.5:35b`
+3. `qwen3.5:122b`
+4. `qwen3-coder:30b`
+5. `qwen3-coder-next`
+
+Alasan:
+
+1. Ukuran model terlalu besar.
+2. Konsumsi RAM tinggi.
+3. Respons lambat.
+4. Tidak cocok untuk CLI harian.
+5. Risiko freezing tinggi pada laptop target.
+
+### 7.8 Strategi Context Qwen3.5
+
+Walaupun Qwen3.5 mendukung context window besar, NanoCLI harus memakai batas operasional berikut.
+
+| Mode | Target `num_ctx` | Penggunaan |
+|---|---:|---|
+| Fast | 4096 sampai 8192 | prompt pendek |
+| Normal | 8192 sampai 16384 | ask, chat, review kecil |
+| Project | 16384 sampai 32768 | project-aware ask, debug, test |
+| Deep | 32768 | review arsitektur atau multi-file |
+| Experimental Long Context | 65536 | hanya jika RAM cukup dan pengguna sadar risiko |
+
+NanoCLI tidak boleh diam-diam menaikkan context. Jika pengguna meminta context besar, tampilkan peringatan karena context lebih besar meningkatkan kebutuhan memori.
+
 
 ## 8. Konsep Project Memory
 
@@ -234,6 +316,8 @@ Saat pengguna menjalankan `nanocli init`, aplikasi membuat folder berikut.
     2026-05-15_101500.md
   cache/
     last_context.json
+  benchmarks/
+    2026-05-15_model_benchmark.json
 ```
 
 ### 9.1 PROJECT_CONTEXT.md
@@ -276,7 +360,7 @@ Contoh:
 ## 2026-05-15
 - Use Typer for CLI command structure.
 - Use Rich for terminal formatting.
-- Use qwen2.5-coder:3b as default model.
+- Use qwen3.5:4b-q4_K_M as default model.
 - Use local project memory instead of fine-tuning.
 ```
 
@@ -518,7 +602,7 @@ Output contoh:
 ```text
 NanoCLI initialized.
 Project memory created at .nanocli/
-Default model: qwen2.5-coder:3b
+Default model: qwen3.5:4b-q4_K_M
 ```
 
 ## 12.2 Fitur 2: Ask Command
@@ -548,7 +632,7 @@ Acceptance criteria:
 Opsi:
 
 ```bash
-nanocli ask "jelaskan fungsi ini" --model qwen2.5-coder:7b
+nanocli ask "jelaskan fungsi ini" --model qwen3.5:9b-q4_K_M
 nanocli ask "buat regex password" --no-memory
 ```
 
@@ -581,7 +665,7 @@ Command tambahan di dalam chat:
 ```text
 /memory show
 /memory update
-/model qwen2.5-coder:7b
+/model qwen3.5:9b-q4_K_M
 /clear
 /exit
 ```
@@ -636,8 +720,9 @@ nanocli review app.py --focus security
 
 Model default:
 
-- Normal: qwen2.5-coder:3b
-- Deep: qwen2.5-coder:7b
+- Normal: qwen3.5:4b-q4_K_M
+- Deep: qwen3.5:9b-q4_K_M
+- Fallback coding-specific: qwen2.5-coder:3b
 
 ## 12.5 Fitur 5: Debug File
 
@@ -845,8 +930,9 @@ Command:
 
 ```bash
 nanocli config show
-nanocli config set default_model qwen2.5-coder:3b
-nanocli config set deep_model qwen2.5-coder:7b
+nanocli config set default_model qwen3.5:4b-q4_K_M
+nanocli config set fast_model qwen3.5:2b-q4_K_M
+nanocli config set deep_model qwen3.5:9b-q4_K_M
 ```
 
 Deskripsi:
@@ -859,6 +945,64 @@ Acceptance criteria:
 2. Pengguna bisa mengganti model default.
 3. Pengguna bisa mengganti batas context.
 4. Pengguna bisa mengatur ignore pattern.
+
+
+## 12.13 Fitur 13: Model Benchmark
+
+Command:
+
+```bash
+nanocli models benchmark
+```
+
+Deskripsi:
+
+Menguji model lokal di laptop pengguna agar NanoCLI dapat memilih model terbaik secara empiris.
+
+User story:
+
+Sebagai developer, saya ingin mengetahui model mana yang paling lancar di laptop saya agar saya tidak salah memilih default model.
+
+Acceptance criteria:
+
+1. Command menguji model fast, default, deep, dan fallback.
+2. Command mengukur waktu sampai token pertama.
+3. Command mengukur total durasi respons.
+4. Command mengukur estimasi token per detik.
+5. Command menguji prompt coding pendek.
+6. Command menguji prompt review kecil.
+7. Command menyimpan hasil ke `.nanocli/benchmarks/`.
+8. Command dapat merekomendasikan model default berdasarkan hasil benchmark.
+
+Output contoh:
+
+```text
+Model Benchmark Result
+
+qwen3.5:2b-q4_K_M
+- First token: 2.1s
+- Speed: 24 tok/s
+- Recommendation: fast mode
+
+qwen3.5:4b-q4_K_M
+- First token: 4.8s
+- Speed: 13 tok/s
+- Recommendation: default mode
+
+qwen3.5:9b-q4_K_M
+- First token: 12.4s
+- Speed: 5 tok/s
+- Recommendation: deep mode only
+```
+
+Opsi:
+
+```bash
+nanocli models benchmark --save
+nanocli models benchmark --set-best
+nanocli models benchmark --include-fallback-coder
+```
+
 
 ## 13. Alur Kerja Harian yang Direkomendasikan
 
@@ -1037,9 +1181,11 @@ Isi default:
 
 ```yaml
 models:
-  default: qwen2.5-coder:3b
-  fast: qwen2.5-coder:1.5b
-  deep: qwen2.5-coder:7b
+  default: qwen3.5:4b-q4_K_M
+  fast: qwen3.5:2b-q4_K_M
+  deep: qwen3.5:9b-q4_K_M
+  fallback_coder: qwen2.5-coder:3b
+  deep_coder: qwen2.5-coder:7b
   embedding: nomic-embed-text
 
 ollama:
@@ -1047,23 +1193,30 @@ ollama:
   stream: true
   temperature: 0.2
   top_p: 0.9
+  num_ctx_fast: 8192
+  num_ctx_normal: 16384
+  num_ctx_deep: 32768
+  num_predict: 2048
 
 context:
-  normal_max_chars: 12000
-  deep_max_chars: 24000
-  memory_chunks: 5
-  file_chunk_chars: 4000
+  normal_max_chars: 16000
+  deep_max_chars: 32000
+  memory_chunks: 7
+  file_chunk_chars: 5000
+  enable_context_compaction: true
 
 safety:
   block_sensitive_files: true
   require_confirm_before_write: true
   allow_shell_execution: false
+  block_auto_apply_for_patch: true
 
 memory:
   enabled: true
   auto_update_after_patch: true
   save_sessions: true
-  summarization_model: qwen2.5-coder:3b
+  summarization_model: qwen3.5:4b-q4_K_M
+  embedding_model: nomic-embed-text
 ```
 
 ## 17. Kebutuhan Non-Fungsional
@@ -1072,10 +1225,23 @@ memory:
 
 Target performa:
 
-1. `ask` mulai streaming dalam 2 sampai 8 detik pada model 3B.
-2. `review` file kecil selesai dalam 20 sampai 60 detik.
-3. `memory update` proyek kecil selesai dalam 1 sampai 5 menit.
-4. Model 7B boleh lebih lambat dan hanya digunakan untuk mode deep.
+1. `ask` mulai streaming dalam 2 sampai 10 detik pada `qwen3.5:4b-q4_K_M`.
+2. `ask --fast` mulai streaming lebih cepat menggunakan `qwen3.5:2b-q4_K_M`.
+3. `review` file kecil selesai dalam 20 sampai 75 detik pada model 4B.
+4. `memory update` proyek kecil selesai dalam 1 sampai 5 menit.
+5. `--deep` menggunakan `qwen3.5:9b-q4_K_M` dan boleh lebih lambat.
+6. Mode deep harus memberi peringatan jika RAM bebas rendah.
+7. Mode normal harus menjaga `num_ctx` sekitar 8K sampai 16K.
+8. Mode deep boleh memakai 32K context jika hardware masih stabil.
+
+Indikator performa yang harus dicatat oleh NanoCLI:
+
+1. Waktu sampai token pertama.
+2. Total durasi respons.
+3. Estimasi token per detik.
+4. Model yang digunakan.
+5. Context mode yang digunakan.
+6. Jumlah file dan memory chunk yang masuk ke prompt.
 
 ### 17.2 Keamanan
 
@@ -1175,7 +1341,7 @@ nanocli --help
 
 berjalan dengan benar.
 
-### Phase 1: Core LLM
+### Phase 1: Core LLM dan Model Runtime
 
 Target:
 
@@ -1183,14 +1349,26 @@ Target:
 2. Implementasi streaming output.
 3. Implementasi model selector.
 4. Error handling jika Ollama mati.
+5. Pull dan validasi model utama.
+6. Tambahkan benchmark awal untuk Qwen3.5.
+
+Model yang perlu diuji:
+
+```bash
+ollama pull qwen3.5:4b-q4_K_M
+ollama pull qwen3.5:2b-q4_K_M
+ollama pull qwen3.5:9b-q4_K_M
+ollama pull nomic-embed-text
+```
 
 Definition of done:
 
 ```bash
 nanocli ask "hello"
+nanocli models benchmark
 ```
 
-berhasil memberi jawaban.
+berhasil memberi jawaban dan menampilkan hasil benchmark lokal.
 
 ### Phase 2: Basic Commands
 
@@ -1333,6 +1511,7 @@ nanocli config show
 nanocli config set <key> <value>
 nanocli models list
 nanocli models pull
+nanocli models benchmark
 ```
 
 ## 24. Definisi Sukses
@@ -1340,20 +1519,47 @@ nanocli models pull
 NanoCLI dianggap berhasil jika:
 
 1. Pengguna bisa memakai AI lokal untuk coding harian tanpa membuka browser.
-2. Model 3B terasa responsif pada hardware target.
-3. Memory proyek membuat jawaban lebih sesuai konteks.
-4. Pengguna tidak perlu menjelaskan ulang struktur proyek setiap sesi.
-5. Review, debug, dan test memberi hasil yang praktis.
-6. Tidak ada file sensitif yang terbaca atau tersimpan tanpa izin.
-7. Pengguna dapat melanjutkan proyek besar dengan konteks yang tersimpan.
+2. `qwen3.5:4b-q4_K_M` terasa responsif pada hardware target.
+3. `qwen3.5:2b-q4_K_M` tersedia sebagai fast mode.
+4. `qwen3.5:9b-q4_K_M` tersedia sebagai deep mode dengan peringatan memori.
+5. Project Memory membuat jawaban lebih sesuai konteks.
+6. Pengguna tidak perlu menjelaskan ulang struktur proyek setiap sesi.
+7. Review, debug, dan test memberi hasil yang praktis.
+8. Tidak ada file sensitif yang terbaca atau tersimpan tanpa izin.
+9. Pengguna dapat melanjutkan proyek besar dengan konteks yang tersimpan.
+10. Benchmark model dapat membantu pengguna memilih model paling lancar di laptopnya.
 
 ## 25. Kesimpulan Teknis
 
-Dengan spesifikasi i5-11400H, RAM 16 GB, dan RTX 3050 4GB VRAM, NanoCLI sangat mungkin dibuat dan digunakan secara nyaman jika model default memakai qwen2.5-coder:3b.
+Dengan spesifikasi i5-11400H, RAM 16 GB, dan RTX 3050 4GB VRAM, NanoCLI tetap sangat mungkin dibuat dan digunakan secara nyaman jika strategi modelnya disiplin.
 
-Fitur Project Memory juga sangat mungkin dibuat. Cara terbaik bukan dengan membuat model belajar sendiri melalui training, melainkan dengan membuat sistem memory lokal yang menyimpan ringkasan proyek, keputusan teknis, changelog, bug, dan embedding. Saat pengguna bertanya, NanoCLI mengambil konteks relevan dari memory dan memasukkannya ke prompt.
+Model utama yang direkomendasikan adalah:
 
-Pendekatan ini lebih ringan, lebih aman, dan lebih cocok untuk laptop target.
+```bash
+qwen3.5:4b-q4_K_M
+```
+
+Model ini dipilih karena lebih baru, mendukung context besar, mendukung workflow agentic, dan masih cukup realistis untuk laptop target. Namun, NanoCLI tetap harus membatasi `num_ctx` agar tidak membebani VRAM.
+
+Untuk mode cepat, NanoCLI memakai:
+
+```bash
+qwen3.5:2b-q4_K_M
+```
+
+Untuk mode deep, NanoCLI memakai:
+
+```bash
+qwen3.5:9b-q4_K_M
+```
+
+Model deep tidak boleh menjadi default karena lebih berat. Model ini hanya digunakan untuk analisis arsitektur, debugging rumit, review multi-file, dan planning kompleks.
+
+Qwen2.5-Coder tetap disimpan sebagai fallback coding-specific. Fallback ini berguna jika Qwen3.5 memberi jawaban terlalu umum untuk tugas coding murni.
+
+Fitur Project Memory juga sangat mungkin dibuat. Cara terbaik bukan membuat model belajar sendiri melalui training, melainkan membuat sistem memory lokal yang menyimpan ringkasan proyek, keputusan teknis, changelog, bug, dan embedding. Saat pengguna bertanya, NanoCLI mengambil konteks relevan dari memory dan memasukkannya ke prompt.
+
+Pendekatan ini ringan, aman, dan cocok untuk laptop target. NanoCLI akan terasa seperti coding assistant yang mengingat proyek, bukan sekadar chatbot terminal.
 
 ## 26. Desain Prompt dan Agent Behavior
 
@@ -1740,7 +1946,7 @@ Do not rewrite the whole file unless requested.
 
 Relevant project memory:
 - This project uses Typer, Rich, Ollama, YAML config, and SQLite memory.
-- Default model is qwen2.5-coder:3b.
+- Default model is qwen3.5:4b-q4_K_M.
 - File reading logic should stay in files.py.
 
 File context:
@@ -2056,3 +2262,13 @@ Continuation Controller dan Context Compaction wajib masuk ke NanoCLI karena tar
 
 Keduanya membuat NanoCLI lebih nyaman dipakai untuk proyek besar tanpa harus memakai model besar yang berat untuk RTX 3050 4GB.
 
+
+
+## 28. Sumber Teknis Model
+
+Bagian ini mencatat sumber teknis yang digunakan untuk menentukan strategi model.
+
+1. Ollama Library Qwen3.5: Qwen3.5 menyediakan varian 2B, 4B, 9B, 27B, 35B, dan 122B. Varian `qwen3.5:4b-q4_K_M` berukuran sekitar 3.4 GB dengan context window 256K. Varian `qwen3.5:9b-q4_K_M` berukuran sekitar 6.6 GB dengan context window 256K.
+2. Ollama Library Qwen2.5-Coder: Qwen2.5-Coder adalah seri code-specific dengan ukuran 0.5B sampai 32B, dan digunakan sebagai fallback coding-specific.
+3. Ollama Library nomic-embed-text: `nomic-embed-text` adalah model embedding dan hanya digunakan untuk menghasilkan embedding.
+4. Ollama Context Length Documentation: context lebih besar membutuhkan memori lebih besar, sehingga NanoCLI harus mengontrol `num_ctx` berdasarkan hardware.
