@@ -1,0 +1,97 @@
+import { getEncoding, encodingForModel, TiktokenModel } from 'js-tiktoken';
+import { Message } from '../llm/openrouterClient';
+
+export interface TokenStats {
+  inputTokens: number;
+  outputTokens: number;
+  budget: number;
+  remaining: number;
+  percentUsed: number;
+}
+
+export class TokenBudgetManager {
+  private encoding;
+
+  constructor() {
+    // Gunakan cl100k_base sebagai standar universal untuk estimasi
+    this.encoding = getEncoding('cl100k_base');
+  }
+
+  /**
+   * Menghitung jumlah token dari sebuah string teks.
+   */
+  countTextTokens(text: string): number {
+    return this.encoding.encode(text).length;
+  }
+
+  /**
+   * Menghitung jumlah token dari daftar pesan (Chat format).
+   * Menambahkan overhead token sesuai standar OpenAI (3-4 token per pesan).
+   */
+  countMessageTokens(messages: Message[]): number {
+    let total = 0;
+    for (const msg of messages) {
+      total += 4; // Overhead per pesan
+      total += this.countTextTokens(msg.content);
+      total += this.countTextTokens(msg.role);
+    }
+    total += 3; // Overhead akhir untuk respon assistant
+    return total;
+  }
+
+  /**
+   * Mengestimasi biaya request dalam USD.
+   */
+  estimateCost(inputTokens: number, pricing: { prompt: string; completion: string }, expectedOutputTokens: number = 1000): number {
+    const promptPrice = parseFloat(pricing.prompt) * inputTokens;
+    const completionPrice = parseFloat(pricing.completion) * expectedOutputTokens;
+    return promptPrice + completionPrice;
+  }
+
+  /**
+   * Mendapatkan budget token berdasarkan mode (sesuai PRD Bagian 12.5).
+   */
+  getBudgetForMode(mode: string): number {
+    const budgets: Record<string, number> = {
+      'fast': 4000,
+      'normal': 8000,
+      'high': 16000,
+      'extra-high': 32000
+    };
+    return budgets[mode] || 8000;
+  }
+
+  /**
+   * Mendapatkan statistik penggunaan token saat ini.
+   */
+  getStats(messages: Message[], mode: string): TokenStats {
+    const inputTokens = this.countMessageTokens(messages);
+    const budget = this.getBudgetForMode(mode);
+    const remaining = Math.max(0, budget - inputTokens);
+    const percentUsed = (inputTokens / budget) * 100;
+
+    return {
+      inputTokens,
+      outputTokens: 0, // Akan diisi setelah respon diterima
+      budget,
+      remaining,
+      percentUsed
+    };
+  }
+
+  /**
+   * Mengecek apakah jumlah token melebihi budget.
+   */
+  isOverBudget(messages: Message[], mode: string): boolean {
+    return this.countMessageTokens(messages) > this.getBudgetForMode(mode);
+  }
+
+  /**
+   * Menghitung persentase penghematan (Token Saving).
+   * Formula: ((baseline - actual) / baseline) * 100
+   */
+  calculateSaving(baseline: number, actual: number): number {
+    if (baseline === 0) return 0;
+    return ((baseline - actual) / baseline) * 100;
+  }
+}

@@ -110,6 +110,19 @@ ENV/
 env.bak/
 venv.bak/
 
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
 # Spyder project settings
 .spyderproject
 .spyproject
