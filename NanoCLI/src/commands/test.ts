@@ -11,6 +11,7 @@ import { ModelManager } from '../llm/modelManager';
 import { Renderer } from '../ui/render';
 import { isValidMode, VALID_MODES } from '../config/modes';
 import { safeReadTextFile } from '../files/safeFileReader';
+import { FileOperationManager } from '../file/fileOperationManager';
 
 export class TestCommand {
   private configManager: ConfigManager;
@@ -19,6 +20,7 @@ export class TestCommand {
   private compactor: ContextCompactor;
   private statsManager: StatsManager;
   private modelManager: ModelManager;
+  private fileManager: FileOperationManager;
 
   constructor(projectRoot: string = process.cwd()) {
     this.configManager = new ConfigManager(projectRoot);
@@ -27,6 +29,7 @@ export class TestCommand {
     this.compactor = new ContextCompactor();
     this.statsManager = new StatsManager(projectRoot);
     this.modelManager = new ModelManager(projectRoot);
+    this.fileManager = new FileOperationManager(projectRoot);
   }
 
   async execute(filePath: string, options: any) {
@@ -155,7 +158,7 @@ Provide only the test code inside a single Markdown code block.`
   }
 
   private async handleWrite(originalPath: string, aiResponse: string, overwrite: boolean = false) {
-    // Extract code from markdown block
+    // Extract code dari markdown block
     const codeMatch = aiResponse.match(/```(?:\w+)?\n([\s\S]*?)```/);
     if (!codeMatch || !codeMatch[1]) {
       Renderer.printStatus('Gagal mengekstrak kode test dari respon AI.', 'error');
@@ -168,20 +171,20 @@ Provide only the test code inside a single Markdown code block.`
     const base = path.basename(originalPath, ext);
     const testPath = path.join(dir, `${base}.test${ext}`);
 
-    // Fix Bug 3.11: cek apakah file test sudah ada sebelum menimpa
-    if (!overwrite && await fs.pathExists(testPath)) {
-      Renderer.printStatus(
-        `File test sudah ada: ${chalk.bold(testPath)}. Gunakan --overwrite untuk menimpa.`,
-        'warn'
-      );
-      return;
-    }
+    // Routing melalui FileOperationManager — wajib melalui approval gate, path guard, backup, dan risk analysis.
+    // JANGAN gunakan fs.writeFile langsung di sini.
+    const result = await this.fileManager.write(
+      testPath,
+      testCode,
+      overwrite ? 'overwrite' : 'create',
+      {
+        requireApproval: true,
+        showDiff: true,
+        autoApprove: false,
+        reason: `Auto-generated unit test untuk ${path.basename(originalPath)}`,
+      },
+    );
 
-    try {
-      await fs.writeFile(testPath, testCode, 'utf-8');
-      Renderer.printStatus(`File test berhasil ditulis ke: ${chalk.bold(testPath)}`, 'success');
-    } catch (error: any) {
-      Renderer.printStatus(`Gagal menulis file test: ${error.message}`, 'error');
-    }
+    this.fileManager.printResult(result);
   }
 }

@@ -22,6 +22,7 @@ import { ToolRouter } from './toolRouter';
 import { StepRunner } from './stepRunner';
 import {
   AgentAction,
+  AgentMessage,
   AgentLoopOptions,
   AgentState,
   AgentStep,
@@ -98,6 +99,27 @@ export class AgentLoop {
     this.modelManager = new ModelManager(projectRoot);
   }
 
+  /**
+   * Konversi AgentMessage[] (internal) ke Message[] yang diterima OpenRouter API.
+   *
+   * OpenRouter tidak menerima role 'tool' — wajib dikonversi ke role 'user'
+   * dengan prefix yang jelas agar LLM tetap memahami konteks hasil eksekusi.
+   */
+  private normalizeMessagesForLLM(messages: AgentMessage[]): Message[] {
+    return messages.map((msg, idx) => {
+      if (msg.role === 'tool') {
+        return {
+          role: 'user' as const,
+          content: `[Tool Result - Step ${idx}]\n${msg.content}`,
+        };
+      }
+      return {
+        role: msg.role as 'system' | 'user' | 'assistant',
+        content: msg.content,
+      };
+    });
+  }
+
   async run(
     task: string,
     apiKey: string,
@@ -140,15 +162,31 @@ export class AgentLoop {
     console.log();
 
     // 3. Agent loop
+    let consecutiveFailures = 0;
+    const MAX_CONSECUTIVE_FAILURES = 3;
+
     for (let step = 1; step <= options.maxSteps; step++) {
       console.log(chalk.gray(`  ● Step ${step}/${options.maxSteps}`));
 
       // Compact messages
+      const normalizedForLLM = this.normalizeMessagesForLLM(state.messages);
       const compacted = this.compactor.compactMessages(
-        state.messages as Message[],
+        normalizedForLLM,
         options.mode,
         modelMetadata?.context_length,
       );
+
+      // Cost guard per step — info jika token mulai banyak
+      if (modelMetadata) {
+        const stepTokens = this.tokenManager.countMessageTokens(compacted);
+        const stepCost = this.tokenManager.estimateCost(stepTokens, modelMetadata.pricing, 800);
+        if (stepCost > 0.02) {
+          Renderer.printStatus(
+            `Estimasi biaya step ${step}: $${stepCost.toFixed(4)} USD (${stepTokens} token)`,
+            'warn',
+          );
+        }
+      }
 
       // Request LLM — tampilkan output secara real-time
       let fullResponse = '';
@@ -258,6 +296,22 @@ export class AgentLoop {
       if (options.verbose || !result.success) {
         const icon = result.success ? chalk.green('✓') : chalk.red('✗');
         console.log(`    ${icon} ${result.output.slice(0, 120)}`);
+      }
+
+      // Consecutive failure guard
+      if (!result.success) {
+        consecutiveFailures++;
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          Renderer.printStatus(
+            `Agent berhenti: ${MAX_CONSECUTIVE_FAILURES} step berturut-turut gagal. Periksa konfigurasi atau berikan task yang lebih spesifik.`,
+            'error',
+          );
+          state.status = 'error';
+          this.renderPartialSummary(state);
+          return state;
+        }
+      } else {
+        consecutiveFailures = 0; // reset jika step berhasil
       }
     }
 

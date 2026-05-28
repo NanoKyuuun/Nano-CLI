@@ -64,6 +64,25 @@ export class StepRunner {
       ? path.resolve(this.projectRoot, cwd)
       : this.projectRoot;
 
+    // ── Workspace Boundary Validation ─────────────────────────────────────
+    // Mencegah agent meng-escape workspace dengan path traversal seperti:
+    // {"type": "terminal.run", "command": "cat /etc/passwd", "cwd": "../../.."}
+    //
+    // effectiveCwd WAJIB berada di dalam projectRoot.
+    // path.resolve() sudah menyelesaikan traversal — kita tinggal cek prefix.
+    const safeRoot = this.projectRoot.endsWith(path.sep)
+      ? this.projectRoot
+      : this.projectRoot + path.sep;
+
+    if (effectiveCwd !== this.projectRoot && !effectiveCwd.startsWith(safeRoot)) {
+      return {
+        success: false,
+        output: `Ditolak: cwd "${effectiveCwd}" berada di luar workspace "${this.projectRoot}". Agent tidak boleh menjalankan command di luar project root.`,
+        skipped: true,
+        skipReason: 'workspace boundary violation',
+      };
+    }
+
     Renderer.printStatus(`Menganalisis command: ${command}`, 'info');
 
     // Detect shell dulu

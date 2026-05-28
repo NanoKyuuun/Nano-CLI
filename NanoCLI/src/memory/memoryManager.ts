@@ -259,16 +259,18 @@ export class MemoryManager {
    * lalu re-rank secara global berdasarkan score sebelum diinjeksi ke LLM.
    *
    * Pipeline:
-   * 1. Local FTS5 search (BM25 score 0–1)
+   * 1. Local FTS5 search (BM25 score, skala berbeda-beda)
    * 2. Remote semantic search (cosine similarity 0–1)
-   * 3. Merge ke array unified
-   * 4. Dedup berdasarkan content fingerprint
-   * 5. Sort descending by score
-   * 6. Potong berdasarkan maxChars budget
-   * 7. Format terstruktur untuk LLM
+   * 3. Normalisasi skor lokal dan remote secara terpisah (Min-Max Scaling)
+   *    → WAJIB sebelum merge: tanpa normalisasi, BM25 selalu mendominasi cosine
+   * 4. Merge ke array unified
+   * 5. Dedup berdasarkan content fingerprint
+   * 6. Sort descending by score (semua sudah dalam skala 0–1)
+   * 7. Potong berdasarkan maxChars budget
+   * 8. Format terstruktur untuk LLM
    *
    * @param query    Teks query untuk mencari konteks relevan
-   * @param maxChars Batas karakter total context (default 4000 ≈ ~1000 tokens)
+   * @param maxChars Batas karakter total context (default 12000 ≈ ~3000 tokens)
    */
   async getContextForQuery(query: string, maxChars = 12_000): Promise<string> {
     interface ContextEntry {
@@ -377,19 +379,31 @@ export class MemoryManager {
 
     if (entries.length === 0) return '';
 
-    // ── 3. Global re-ranking ────────────────────────────────────────
-    entries.sort((a, b) => b.score - a.score);
+    // ── 3. Normalisasi skor sebelum merge ──────────────────────────
+    // BM25 (FTS5 lokal) dan cosine similarity (remote) berada di skala berbeda.
+    // Min-Max normalization dilakukan terpisah per sumber agar keduanya
+    // berkompetisi secara adil di sort global.
+    const localEntries  = entries.filter(e => e.source !== 'remote');
+    const remoteEntries = entries.filter(e => e.source === 'remote');
 
-    // ── 4. Dedup berdasarkan content fingerprint (first 120 chars) ──
+    this.normalizeScores(localEntries);
+    this.normalizeScores(remoteEntries);
+
+    const normalizedEntries = [...localEntries, ...remoteEntries];
+
+    // ── 4. Global re-ranking ─────────────────────────────────
+    normalizedEntries.sort((a, b) => b.score - a.score);
+
+    // ── 5. Dedup berdasarkan content fingerprint (first 120 chars) ──
     const seen = new Set<string>();
-    const deduped = entries.filter(e => {
+    const deduped = normalizedEntries.filter(e => {
       const fingerprint = e.content.slice(0, 120).toLowerCase().replace(/\s+/g, ' ');
       if (seen.has(fingerprint)) return false;
       seen.add(fingerprint);
       return true;
     });
 
-    // ── 5. Build context dengan token budget ───────────────────────
+    // ── 6. Build context dengan token budget ───────────────────────
     const lines: string[] = [];
     let totalChars = 0;
 
@@ -409,7 +423,7 @@ export class MemoryManager {
 
     if (lines.length === 0) return '';
 
-    // ── 6. Structured format untuk LLM ────────────────────────
+    // ── 7. Structured format untuk LLM ────────────────────────
     const header = `--- Project Memory (${lines.length} entries, sorted by relevance) ---`;
     const rawContext = `${header}\n${lines.join('\n')}\n---`;
 
@@ -417,6 +431,33 @@ export class MemoryManager {
     return this.redactor.redact(rawContext);
   }
 
+
+  /**
+   * Min-Max Normalization untuk array ContextEntry.
+   * Mengubah skor ke rentang [0, 1] agar skor dari sumber berbeda
+   * (BM25 vs cosine similarity) dapat dibandingkan secara adil.
+   *
+   * Mutates: entries[i].score langsung diubah in-place.
+   * Jika hanya 1 entry atau semua skor sama, score diset ke 1.0.
+   */
+  private normalizeScores(entries: Array<{ score: number }>): void {
+    if (entries.length === 0) return;
+
+    const scores = entries.map(e => e.score);
+    const min    = Math.min(...scores);
+    const max    = Math.max(...scores);
+    const range  = max - min;
+
+    if (range === 0) {
+      // Semua skor sama — set ke 1.0 (semua sama-sama relevan)
+      for (const e of entries) e.score = 1.0;
+      return;
+    }
+
+    for (const e of entries) {
+      e.score = (e.score - min) / range;
+    }
+  }
 
   /**
    * Menyimpan satu entri ke tabel memory_entries di SQLite.

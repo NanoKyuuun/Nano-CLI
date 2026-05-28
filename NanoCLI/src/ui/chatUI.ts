@@ -232,17 +232,11 @@ export class ChatUI {
           Renderer.printStatus(`🔍 Web Search aktif — ${searchDecision.reason}`, 'info');
         }
 
-        const shouldContinue = await this.checkCostGuard(compactedMessages);
-        if (!shouldContinue) {
-          this.messages.pop();
-          continue;
-        }
-
         // ── Ephemeral RAG context untuk request ini ───────────────────
         // Injeksi SETELAH compact agar tidak di-trim compactor.
         // TIDAK masuk ke this.messages — tidak mengakumulasi per-turn.
         // Budget lebih kecil (2000) karena chat lebih dinamis dari command.
-        let messagesToSend = this.messages;
+        let messagesToSend = compactedMessages;
         try {
           const ragContext = await this.memoryManager.getContextForQuery(userInput, 12_000);
           if (ragContext) {
@@ -258,6 +252,14 @@ export class ChatUI {
           }
         } catch {
           // RAG gagal — tetap lanjut tanpa context
+        }
+
+        // Cost guard dijalankan SETELAH RAG injection agar token RAG ikut dihitung.
+        // Ini memastikan estimasi biaya akurat sebelum request dikirim ke API.
+        const shouldContinueAfterRag = await this.checkCostGuard(messagesToSend);
+        if (!shouldContinueAfterRag) {
+          this.messages.pop();
+          continue;
         }
 
         // Response frame: tampilkan header sebelum stream
@@ -294,7 +296,9 @@ export class ChatUI {
           Renderer.renderResponseEnd(Date.now() - responseStartedAt, responseCostUsd);
 
           this.messages.push({ role: 'assistant', content: fullResponse });
-          await this.logUsage(compactedMessages, fullResponse);
+          // logUsage menggunakan messagesToSend (sudah include RAG context)
+          // agar log token dan cost akurat sesuai yang benar-benar dikirim ke API.
+          await this.logUsage(messagesToSend, fullResponse);
 
           await this.interceptTerminalProposals(fullResponse);
           await this.interceptAgentActions(fullResponse, userInput);

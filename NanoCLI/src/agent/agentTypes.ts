@@ -50,6 +50,24 @@ export type AgentAction =
   | FileReadAgentAction
   | FinalAnswerAction;
 
+// ─── Message Types ────────────────────────────────────────────────────────────
+
+/**
+ * Role internal agent — mencakup 'tool' untuk menyimpan hasil eksekusi tool.
+ * JANGAN kirim type ini langsung ke OpenRouter API.
+ * Gunakan normalizeMessagesForLLM() di agentLoop.ts untuk mengkonversi terlebih dahulu.
+ */
+export type AgentMessageRole = 'system' | 'user' | 'assistant' | 'tool';
+
+/**
+ * Pesan internal agent — dipakai untuk AgentState.messages.
+ * Dapat berisi role 'tool' yang HARUS dinormalisasi sebelum dikirim ke LLM.
+ */
+export interface AgentMessage {
+  role: AgentMessageRole;
+  content: string;
+}
+
 // ─── State ────────────────────────────────────────────────────────────────────
 
 export interface AgentStep {
@@ -68,7 +86,8 @@ export interface AgentStepResult {
 
 export interface AgentState {
   task: string;
-  messages: Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: string }>;
+  /** Pesan internal — gunakan normalizeMessagesForLLM() sebelum dikirim ke model */
+  messages: AgentMessage[];
   steps: AgentStep[];
   filesChanged: string[];
   commandsRun: string[];
@@ -82,9 +101,14 @@ export interface AgentLoopOptions {
   maxSteps: number;
   mode: string;
   modelId?: string;
-  /** Izin agent: workspace = hanya di project root, full = tidak ada batasan */
-  permission: 'workspace' | 'full';
-  /** Dry run: approve tampilkan proposal tapi tidak eksekusi */
+  /**
+   * Izin agent:
+   * - 'readonly'  → hanya read, search, inspect. Tidak boleh write/run command.
+   * - 'workspace' → write dan run command hanya di project root (default).
+   * - 'full'      → akses luar workspace, wajib approval eksplisit per action.
+   */
+  permission: 'readonly' | 'workspace' | 'full';
+  /** Dry run: tampilkan proposal tapi tidak eksekusi */
   dryRun: boolean;
   /** Tampilkan output verbose setiap step */
   verbose: boolean;
