@@ -84,7 +84,20 @@ export class FileOperationManager {
       }
     }
 
-    // 3. Risk Analysis
+    // 3. Guard: mode 'create' TIDAK boleh menimpa file yang sudah ada.
+    // Jika file sudah ada dan mode adalah 'create', tolak operasi dengan
+    // pesan yang mengarahkan user ke mode 'overwrite' secara eksplisit.
+    // Ini mencegah agent menimpa file yang tidak seharusnya ditimpa.
+    if (mode === 'create' && fileExists) {
+      return {
+        success: false,
+        path: relativePath,
+        action: mode,
+        error: `File sudah ada: ${relativePath}. Gunakan mode 'overwrite' untuk menimpa.`,
+      };
+    }
+
+    // 4. Risk Analysis
     const risk = this.riskAnalyzer.analyze({
       relativePath,
       mode,
@@ -96,7 +109,7 @@ export class FileOperationManager {
       return { success: false, path: relativePath, action: mode, error: `Diblokir: ${risk.reasons.join(', ')}` };
     }
 
-    // 4. Approval Gate
+    // 5. Approval Gate
     if (requireApproval && !autoApprove) {
       let diffStr: string | undefined;
 
@@ -118,14 +131,16 @@ export class FileOperationManager {
       }
     }
 
-    // 5. Backup sebelum overwrite
+    // 6. Backup sebelum overwrite
+    // Catatan: mode 'create' tidak pernah sampai di sini jika file sudah ada
+    // (sudah ditolak oleh guard di atas). Backup hanya relevan untuk 'overwrite'.
     let backupPath: string | undefined;
-    if (fileExists && (mode === 'overwrite' || mode === 'create')) {
+    if (fileExists && mode === 'overwrite') {
       const backup = await this.backupManager.backup(absolutePath);
       backupPath = backup?.backupPath;
     }
 
-    // 6. Tulis file
+    // 7. Tulis file
     try {
       await fs.ensureDir(path.dirname(absolutePath));
 
@@ -137,7 +152,7 @@ export class FileOperationManager {
 
       const stat = await fs.stat(absolutePath);
 
-      // 7. Generate diff untuk summary
+      // 8. Generate diff untuk summary
       let diff: string | undefined;
       if (oldContent !== undefined) {
         const stats = this.diffPreview.getStats(oldContent, content);

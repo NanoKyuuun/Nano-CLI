@@ -18,6 +18,20 @@ export interface MemoryEntry {
   content: string;
   sourceFile?: string;
   timestamp: number;
+  // ── Self-learning fields (opsional, backward-compatible) ──────────────────
+  /** 'project' | 'user' | 'session' — default: 'project' */
+  scope?: string;
+  /**
+   * Asal memory: 'manual' | 'chat_extractor' | 'agent' | 'command'
+   * Default: 'manual'
+   */
+  source?: string;
+  /** Keyakinan relevansi 0.0–1.0. Default: 1.0 */
+  confidence?: number;
+  /** 1 = pinned (prioritas tinggi di RAG). Default: 0 */
+  pinned?: number;
+  /** ID entri yang menggantikan entri ini (konflik preferensi) */
+  superseded_by?: number | null;
 }
 
 export class Indexer {
@@ -100,19 +114,45 @@ export class Indexer {
         INSERT INTO memory_fts(rowid, content, type, source_file) VALUES (new.id, new.content, new.type, new.source_file);
       END;
 
-      -- ── Indexes ──────────────────────────────────────────────────────────
-      -- Aman di-run pada database lama: CREATE INDEX IF NOT EXISTS tidak error
-      -- jika index sudah ada.
-
-      -- Index pada feedback untuk query analitik CLI development
+      -- ── Indexes ──────────────────────────────────────────────────────────────
       CREATE INDEX IF NOT EXISTS feedback_rating_idx    ON feedback (rating);
       CREATE INDEX IF NOT EXISTS feedback_model_idx     ON feedback (model_id);
       CREATE INDEX IF NOT EXISTS feedback_timestamp_idx ON feedback (timestamp DESC);
 
-      -- Index pada memory_entries untuk query "entry terbaru" dan filter by type
       CREATE INDEX IF NOT EXISTS memory_entries_timestamp_idx ON memory_entries (timestamp DESC);
       CREATE INDEX IF NOT EXISTS memory_entries_type_idx      ON memory_entries (type);
     `);
+
+    // Jalankan migrasi schema setelah inisialisasi tabel dasar.
+    // Aman untuk database lama: PRAGMA check sebelum ALTER TABLE.
+    this.runSchemaMigrations();
+  }
+
+  /**
+   * Migrasi schema untuk kolom self-learning memory.
+   *
+   * SQLite tidak mendukung `ALTER TABLE ADD COLUMN IF NOT EXISTS`.
+   * Solusi: cek kolom existing via PRAGMA table_info, baru ALTER jika perlu.
+   * Aman untuk database lama — tidak akan error jika sudah dijalankan sebelumnya.
+   */
+  private runSchemaMigrations(): void {
+    const existingCols = (
+      this.db.prepare('PRAGMA table_info(memory_entries)').all() as Array<{ name: string }>
+    ).map(c => c.name);
+
+    const migrations: Array<[string, string]> = [
+      ['scope',          "ALTER TABLE memory_entries ADD COLUMN scope TEXT DEFAULT 'project'"],
+      ['source',         "ALTER TABLE memory_entries ADD COLUMN source TEXT DEFAULT 'manual'"],
+      ['confidence',     'ALTER TABLE memory_entries ADD COLUMN confidence REAL DEFAULT 1.0'],
+      ['pinned',         'ALTER TABLE memory_entries ADD COLUMN pinned INTEGER DEFAULT 0'],
+      ['superseded_by',  'ALTER TABLE memory_entries ADD COLUMN superseded_by INTEGER'],
+    ];
+
+    for (const [col, sql] of migrations) {
+      if (!existingCols.includes(col)) {
+        this.db.exec(sql);
+      }
+    }
   }
 
   updateFileIndex(file: FileIndex) {
@@ -141,10 +181,53 @@ export class Indexer {
 
   addMemoryEntry(entry: MemoryEntry) {
     const insert = this.db.prepare(`
-      INSERT INTO memory_entries (type, content, source_file, timestamp)
-      VALUES (@type, @content, @sourceFile, @timestamp)
+      INSERT INTO memory_entries
+        (type, content, source_file, timestamp, scope, source, confidence, pinned)
+      VALUES
+        (@type, @content, @sourceFile, @timestamp, @scope, @source, @confidence, @pinned)
     `);
-    insert.run(entry);
+    insert.run({
+      type:       entry.type,
+      content:    entry.content,
+      sourceFile: entry.sourceFile ?? null,
+      timestamp:  entry.timestamp,
+      scope:      entry.scope      ?? 'project',
+      source:     entry.source     ?? 'manual',
+      confidence: entry.confidence ?? 1.0,
+      pinned:     entry.pinned     ?? 0,
+    });
+  }
+
+  /**
+   * Hapus satu memory entry berdasarkan ID.
+   * Digunakan oleh /memory forget <id>.
+   * Kembalikan true jika berhasil dihapus, false jika tidak ditemukan.
+   */
+  deleteMemoryEntry(id: number): boolean {
+    const result = this.db.prepare('DELETE FROM memory_entries WHERE id = ?').run(id);
+    return result.changes > 0;
+  }
+
+  /**
+   * Ambil daftar memory entries terbaru untuk ditampilkan di /memory review.
+   * Diurutkan dari yang paling baru.
+   */
+  listMemoryEntries(limit: number = 20): Array<{
+    id: number;
+    type: string;
+    content: string;
+    scope: string;
+    source: string;
+    confidence: number;
+    pinned: number;
+    timestamp: number;
+  }> {
+    return this.db.prepare(`
+      SELECT id, type, content, scope, source, confidence, pinned, timestamp
+      FROM memory_entries
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `).all(limit) as any[];
   }
 
   /**
@@ -181,13 +264,19 @@ export class Indexer {
    */
   search(query: string): {
     files:  Array<{ path: string; summary: string; score: number }>;
-    memory: Array<{ id: number; type: string; content: string; source_file?: string; score: number }>;
+    memory: Array<{
+      id: number;
+      type: string;
+      content: string;
+      source_file?: string;
+      scope: string;
+      confidence: number;
+      score: number;
+    }>;
   } {
     const safeQuery = this.sanitizeFtsQuery(query);
     if (!safeQuery) return { files: [], memory: [] };
 
-    // JOIN dengan FTS5 table untuk mendapatkan bm25() score.
-    // bm25() hanya tersedia saat query langsung ke FTS virtual table.
     const fileSearch = this.db.prepare(`
       SELECT f.id, f.path, f.summary,
              bm25(files_fts) AS bm25_score
@@ -200,6 +289,8 @@ export class Indexer {
 
     const memorySearch = this.db.prepare(`
       SELECT me.id, me.type, me.content, me.source_file,
+             COALESCE(me.scope, 'project') AS scope,
+             COALESCE(me.confidence, 1.0)  AS confidence,
              bm25(memory_fts) AS bm25_score
       FROM memory_fts
       INNER JOIN memory_entries me ON me.id = memory_fts.rowid
@@ -223,11 +314,12 @@ export class Indexer {
           type:        m.type,
           content:     m.content,
           source_file: m.source_file ?? undefined,
+          scope:       m.scope,
+          confidence:  m.confidence,
           score:       this.normalizeBm25(m.bm25_score),
         })),
       };
     } catch {
-      // Fallback jika FTS masih error — kembalikan kosong daripada crash
       return { files: [], memory: [] };
     }
   }
@@ -259,10 +351,9 @@ export class Indexer {
 
     if (!sanitized) return '';
 
-    // Ubah menjadi prefix search per kata agar lebih toleran
     const terms = sanitized
       .split(' ')
-      .filter(t => t.length >= 2)       // skip token terlalu pendek
+      .filter(t => t.length >= 2)
       .map(t => `${t}*`)
       .join(' OR ');
 
@@ -283,14 +374,12 @@ export class Indexer {
   } {
     const filesCount = (this.db.prepare('SELECT COUNT(*) AS c FROM files').get() as any).c as number;
 
-    // Memory entries per type
     const typeRows = this.db
       .prepare('SELECT type, COUNT(*) AS c FROM memory_entries GROUP BY type')
       .all() as Array<{ type: string; c: number }>;
     const memoryByType: Record<string, number> = {};
     for (const row of typeRows) memoryByType[row.type] = row.c;
 
-    // Feedback distribution
     const fbRows = this.db
       .prepare('SELECT rating, COUNT(*) AS c FROM feedback GROUP BY rating')
       .all() as Array<{ rating: number; c: number }>;

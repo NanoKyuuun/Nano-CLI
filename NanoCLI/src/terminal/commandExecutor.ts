@@ -6,9 +6,12 @@
  * Pipeline:
  * 1. Spawn child process dengan shell yang dipilih
  * 2. Stream stdout + stderr ke terminal secara real-time (live output)
+ *    — Line-buffered: chunk diakumulasi sampai newline sebelum di-redact & dicetak
+ *    — MAX_LINE_BUFFER guard: flush parsial jika baris terlalu panjang (>8192 chars)
+ *    — Ini mencegah: (a) secret terpotong antar chunk dan (b) memory explode
  * 3. Capture output untuk return value
  * 4. Timeout enforcement (default 300s untuk long-running commands)
- * 5. Redact secrets dari output
+ * 5. Redact secrets dari output (return value dan audit)
  * 6. Limit output size
  * 7. Return structured result
  *
@@ -20,6 +23,9 @@ import { CommandExecutionResult, ShellProfile } from './terminalTypes';
 import { SecretRedactor } from '../security/secretRedactor';
 import { OutputLimiter } from './outputLimiter';
 import { AuditLogger } from '../security/auditLogger';
+
+/** Batas maksimal buffer per baris sebelum flush parsial (8 KB). */
+const MAX_LINE_BUFFER = 8_192;
 
 export class CommandExecutor {
   private redactor: SecretRedactor;
@@ -51,25 +57,20 @@ export class CommandExecutor {
     pipeStdin?: boolean;
   }): Promise<CommandExecutionResult> {
     const started = Date.now();
-    // Default timeout 300s — cukup untuk composer, npm install, dll.
     const timeoutMs = options.timeoutMs ?? 300_000;
-    // Live output aktif secara default agar user tidak merasa stuck
     const liveOutput = options.liveOutput ?? true;
-    // Pipe stdin agar command semi-interaktif bisa berjalan
-    const pipeStdin = options.pipeStdin ?? true;
+    const pipeStdin  = options.pipeStdin  ?? true;
 
     return new Promise((resolve) => {
-      let stdout = '';
-      let stderr = '';
+      let stdout   = '';
+      let stderr   = '';
       let timedOut = false;
 
-      // stdin: inherit jika pipeStdin, ignore jika tidak
       const stdinMode = pipeStdin ? 'inherit' : 'ignore';
 
-      // Spawn menggunakan shell yang dipilih
       const child = spawn(options.shell.command, [...options.shell.args, options.command], {
-        cwd: options.cwd,
-        env: process.env,
+        cwd:   options.cwd,
+        env:   process.env,
         stdio: [stdinMode, 'pipe', 'pipe'],
       });
 
@@ -77,59 +78,101 @@ export class CommandExecutor {
       const timer = setTimeout(() => {
         timedOut = true;
         child.kill('SIGTERM');
-        // Fallback kill jika SIGTERM diabaikan
         setTimeout(() => {
           if (!child.killed) child.kill('SIGKILL');
         }, 3_000);
       }, timeoutMs);
 
+      // ── Line-buffered live redaction ────────────────────────────────────
+      // Masalah lama: process.stdout.write(text) mencetak chunk mentah.
+      // Secret bisa terpotong antar chunk sehingga regex tidak mendeteksi.
+      // Solusi: buffer hingga '\n', redact baris utuh, baru cetak.
+      // Guard: jika buffer > MAX_LINE_BUFFER, flush parsial untuk cegah OOM.
+      //
+      // Pola yang sama dipakai untuk stdout dan stderr.
+
+      let stdoutLineBuf = '';
       child.stdout?.on('data', (chunk: Buffer) => {
         const text = chunk.toString('utf8');
         stdout += text;
-        // Stream ke terminal secara real-time
-        if (liveOutput) process.stdout.write(text);
+
+        if (liveOutput) {
+          stdoutLineBuf += text;
+          // Flush per baris
+          const lines = stdoutLineBuf.split('\n');
+          stdoutLineBuf = lines.pop()!; // sisa belum ada '\n'-nya
+          for (const line of lines) {
+            process.stdout.write(this.redactor.redact(line) + '\n');
+          }
+          // Guard: flush parsial jika buffer terlalu panjang
+          if (stdoutLineBuf.length > MAX_LINE_BUFFER) {
+            process.stdout.write(this.redactor.redact(stdoutLineBuf));
+            stdoutLineBuf = '';
+          }
+        }
       });
 
+      let stderrLineBuf = '';
       child.stderr?.on('data', (chunk: Buffer) => {
         const text = chunk.toString('utf8');
         stderr += text;
-        // Stream stderr ke terminal secara real-time
-        if (liveOutput) process.stderr.write(text);
+
+        if (liveOutput) {
+          stderrLineBuf += text;
+          const lines = stderrLineBuf.split('\n');
+          stderrLineBuf = lines.pop()!;
+          for (const line of lines) {
+            process.stderr.write(this.redactor.redact(line) + '\n');
+          }
+          if (stderrLineBuf.length > MAX_LINE_BUFFER) {
+            process.stderr.write(this.redactor.redact(stderrLineBuf));
+            stderrLineBuf = '';
+          }
+        }
       });
 
       child.on('close', (code) => {
         clearTimeout(timer);
         const durationMs = Date.now() - started;
 
-        // Jika live output aktif, cetak newline pemisah agar output rapi
-        if (liveOutput) process.stdout.write('\n');
+        // Flush sisa buffer yang belum ada newline-nya
+        if (liveOutput) {
+          if (stdoutLineBuf.length > 0) {
+            process.stdout.write(this.redactor.redact(stdoutLineBuf));
+          }
+          if (stderrLineBuf.length > 0) {
+            process.stderr.write(this.redactor.redact(stderrLineBuf));
+          }
+          process.stdout.write('\n');
+        }
 
-        // Sanitize output (untuk return value dan audit — bukan untuk live display)
-        const rawOutput = [stdout, stderr].filter(Boolean).join('\n');
+        // Sanitize output untuk return value dan audit log
+        // (bukan untuk live display — live display sudah di-redact di atas)
+        const rawOutput      = [stdout, stderr].filter(Boolean).join('\n');
         const redactedOutput = this.redactor.redact(rawOutput);
-        const limitedOutput = this.outputLimiter.limit(redactedOutput);
+        const limitedOutput  = this.outputLimiter.limit(redactedOutput);
 
         const result: CommandExecutionResult = {
-          command: options.command,
-          exitCode: code,
-          stdout: this.outputLimiter.limit(this.redactor.redact(stdout)),
-          stderr: this.outputLimiter.limit(this.redactor.redact(stderr)),
-          output: limitedOutput,
+          command:   options.command,
+          exitCode:  code,
+          stdout:    this.outputLimiter.limit(this.redactor.redact(stdout)),
+          stderr:    this.outputLimiter.limit(this.redactor.redact(stderr)),
+          output:    limitedOutput,
           durationMs,
           timedOut,
-          redacted: rawOutput !== redactedOutput,
+          redacted:  rawOutput !== redactedOutput,
         };
 
         // Audit log (fire-and-forget)
         this.auditLogger.logExecution({
-          command: options.command,
-          shell: options.shell.id,
-          cwd: options.cwd,
-          risk: 'executed', // risk sudah dievaluasi sebelum sampai sini
-          exitCode: code,
+          command:   options.command,
+          shell:     options.shell.id,
+          cwd:       options.cwd,
+          risk:      'executed',
+          exitCode:  code,
           durationMs,
           timedOut,
-          redacted: result.redacted,
+          redacted:  result.redacted,
         }).catch(() => { /* best-effort */ });
 
         resolve(result);
@@ -137,19 +180,18 @@ export class CommandExecutor {
 
       child.on('error', (err) => {
         clearTimeout(timer);
-        const durationMs = Date.now() - started;
-
-        const safeMessage = this.redactor.redact(err.message);
+        const durationMs   = Date.now() - started;
+        const safeMessage  = this.redactor.redact(err.message);
 
         resolve({
-          command: options.command,
-          exitCode: null,
-          stdout: '',
-          stderr: safeMessage,
-          output: safeMessage,
+          command:   options.command,
+          exitCode:  null,
+          stdout:    '',
+          stderr:    safeMessage,
+          output:    safeMessage,
           durationMs,
-          timedOut: false,
-          redacted: false,
+          timedOut:  false,
+          redacted:  false,
         });
       });
     });

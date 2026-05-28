@@ -21,6 +21,7 @@ import { shouldSearch } from '../search/searchDecisionEngine';
 import { HomeServerClient } from '../remote/homeServerClient';
 import { TelemetryClient, NANOCLI_TELEMETRY_URL } from '../remote/telemetryClient';
 import { MemoryManager } from '../memory/memoryManager';
+import { MemoryExtractor } from '../memory/memoryExtractor';
 import { SecretRedactor } from '../security/secretRedactor';
 import { TerminalCommand } from '../commands/terminal';
 import { AgentLoop } from '../agent/agentLoop';
@@ -52,6 +53,18 @@ export class ChatUI {
   private projectRoot: string;
   private historyManager: ChatHistoryManager;
   private client: OpenRouterClient | null = null;
+  /**
+   * Flag untuk CTRL+C context-aware:
+   * - true  → user sedang mengetik di prompt enquirer → SIGINT diabaikan (enquirer handle)
+   * - false → idle / streaming → SIGINT memicu exit graceful
+   */
+  private isPromptActive = false;
+  /**
+   * Cache status auto-memory untuk ditampilkan di footer prompt.
+   * Di-init dari config saat startChat(), di-update saat user toggle /memory auto.
+   * Default: true — memory extraction aktif secara default.
+   */
+  private memoryAutoOn = true;
 
   constructor(projectRoot: string = process.cwd()) {
     this.projectRoot = projectRoot;
@@ -112,6 +125,29 @@ export class ChatUI {
 
     await this.displayWelcome();
 
+    // ─── SIGINT handler (Ctrl+C) context-aware ─────────────────────
+    // process.once agar tidak terdaftar berkali-kali jika startChat() dipanggil ulang.
+    // Handler dihapus saat chat loop selesai (normal exit atau error).
+    //
+    // Behavior:
+    // - isPromptActive = true  → user sedang mengetik → skip (enquirer sudah handle)
+    // - isPromptActive = false → idle/streaming       → exit graceful + extraction
+    const sigintHandler = async () => {
+      if (this.isPromptActive) {
+        // Enquirer sudah menangani CTRL+C saat mengetik (cancel prompt).
+        // Re-register handler agar tetap aktif untuk press berikutnya.
+        process.once('SIGINT', sigintHandler);
+        return;
+      }
+      console.log(''); // newline setelah ^C
+      await this.extractAndSaveSessionMemory();
+      process.exit(0);
+    };
+    process.once('SIGINT', sigintHandler);
+
+    // Baca status memory dari config untuk ditampilkan di footer
+    this.memoryAutoOn = (await this.configManager.getFlag('memoryAutoExtract').catch(() => true)) ?? true;
+
     while (true) {
       const stats = this.tokenManager.getStats(this.messages, this.currentMode);
 
@@ -126,17 +162,23 @@ export class ChatUI {
       const budgetPct  = stats.budget > 0 ? Math.round((stats.inputTokens / stats.budget) * 100) : 0;
       const budgetColor = budgetPct > 80 ? chalk.red : budgetPct > 60 ? chalk.yellow : chalk.dim;
 
+      const memoryIcon   = this.memoryAutoOn ? chalk.green('🧠') : chalk.dim('🧠');
+      const memoryStatus = this.memoryAutoOn ? chalk.green('on') : chalk.dim('off');
+
       const prompt = new HistoryInput({
         message: modeColor(`${modeIcon} ${this.currentMode}`) + chalk.dim(` · ${modelShort}`),
         prefix: chalk.cyan('  ›'),
         footer: chalk.dim(`  ${stats.inputTokens}/${stats.budget} tokens`) +
                 budgetColor(` (${budgetPct}%)`) +
-                chalk.dim('  ·  /help for commands  ·  /exit to quit'),
+                chalk.dim('  ·  ') + memoryIcon + chalk.dim(` memory: `) + memoryStatus +
+                chalk.dim('  ·  /help  ·  /exit'),
         history: historyList
       });
 
       try {
+        this.isPromptActive = true;
         const userInput = await prompt.run();
+        this.isPromptActive = false;
 
         if (!userInput || userInput.trim() === '') continue;
 
@@ -146,7 +188,10 @@ export class ChatUI {
         
         if (userInput.startsWith('/')) {
           const shouldExit = await this.handleCommand(userInput);
-          if (shouldExit) break;
+          if (shouldExit) {
+            process.removeListener('SIGINT', sigintHandler);
+            break;
+          }
           continue;
         }
 
@@ -323,6 +368,24 @@ export class ChatUI {
         }
 
       } catch (error) {
+        // Outer catch: enquirer cancel (Ctrl+C saat mengetik) atau error tak terduga
+        this.isPromptActive = false;
+
+        const isCanceled =
+          (error as any)?.message === 'canceled' ||
+          (error as any)?.name   === 'AbortError' ||
+          error === 'canceled';
+
+        if (isCanceled) {
+          // User tekan CTRL+C saat mengetik → batalkan input, loop kembali
+          // Jangan exit — hanya clear baris saat ini
+          console.log(
+            chalk.dim('  [Input dibatalkan. Tekan Ctrl+C lagi atau ketik /exit untuk keluar.]')
+          );
+          continue; // ← kembali ke awal loop, tampilkan prompt lagi
+        }
+
+        // Error lain (bukan cancel) → break loop dan exit normal
         break;
       }
     }
@@ -680,6 +743,8 @@ export class ChatUI {
     switch (command) {
       case '/exit':
       case '/quit':
+        // Picu ekstraksi memori sesi sebelum keluar
+        await this.extractAndSaveSessionMemory();
         return true;
 
       case '/help':
@@ -974,6 +1039,113 @@ export class ChatUI {
         break;
       }
 
+      case '/memory': {
+        const sub = args[0]?.toLowerCase();
+
+        if (sub === 'review') {
+          const entries = await this.memoryManager.listMemoryEntries(20);
+          if (entries.length === 0) {
+            Renderer.printStatus('Belum ada memory entries. Gunakan /memory save <teks> untuk menyimpan.', 'info');
+            console.log('');
+            break;
+          }
+          console.log(chalk.cyan('\nMemory Entries (20 terbaru):'));
+          const rows = entries.map(e => [
+            String(e.id),
+            chalk.yellow(e.type),
+            e.scope,
+            e.source,
+            chalk.dim(e.confidence.toFixed(2)),
+            e.content.slice(0, 45).replace(/\n/g, ' ') + (e.content.length > 45 ? '...' : ''),
+            chalk.dim(new Date(e.timestamp).toLocaleDateString('id-ID')),
+          ]);
+          Renderer.renderTable(['ID', 'Type', 'Scope', 'Source', 'Conf', 'Content', 'Tanggal'], rows);
+          console.log('');
+
+        } else if (sub === 'save') {
+          const text = args.slice(1).join(' ').trim();
+          if (!text) {
+            Renderer.printStatus('Penggunaan: /memory save <teks>', 'error');
+            console.log('');
+            break;
+          }
+          await this.memoryManager.saveMemoryEntry({
+            type:       'preference',
+            content:    text,
+            timestamp:  Date.now(),
+            scope:      'user',
+            source:     'manual',
+            confidence: 1.0,
+          });
+          Renderer.printStatus('Memory disimpan.', 'success');
+          console.log('');
+
+        } else if (sub === 'forget') {
+          const idStr = args[1];
+          const id = idStr ? parseInt(idStr, 10) : NaN;
+          if (isNaN(id)) {
+            Renderer.printStatus('Penggunaan: /memory forget <id>  (lihat ID via /memory review)', 'error');
+            console.log('');
+            break;
+          }
+          // Konfirmasi sebelum hapus
+          const confirmPrompt = new Confirm({
+            name: 'ok',
+            message: `Hapus memory entry ID ${id}?`,
+          });
+          let confirmed = false;
+          try { confirmed = await confirmPrompt.run(); } catch { /* user cancel */ }
+          if (!confirmed) {
+            Renderer.printStatus('Dibatalkan.', 'info');
+            console.log('');
+            break;
+          }
+          const deleted = await this.memoryManager.deleteMemoryEntry(id);
+          if (deleted) {
+            Renderer.printStatus(`Memory ID ${id} berhasil dihapus.`, 'success');
+          } else {
+            Renderer.printStatus(`Memory ID ${id} tidak ditemukan.`, 'error');
+          }
+          console.log('');
+
+        } else if (sub === 'auto') {
+          const val = args[1]?.toLowerCase();
+          if (val === 'on') {
+            await this.configManager.setFlag('memoryAutoExtract', true);
+            this.memoryAutoOn = true;
+            Renderer.printStatus(
+              `Auto-memory ${chalk.green('diaktifkan')}. Memory preferensi akan diekstrak otomatis saat /exit.`,
+              'success'
+            );
+            console.log('');
+          } else if (val === 'off') {
+            await this.configManager.setFlag('memoryAutoExtract', false);
+            this.memoryAutoOn = false;
+            Renderer.printStatus(
+              `Auto-memory ${chalk.dim('dinonaktifkan')}.`,
+              'success'
+            );
+            console.log('');
+          } else {
+            const current = await this.configManager.getFlag('memoryAutoExtract').catch(() => true);
+            console.log(
+              chalk.cyan(`\n  Auto-memory: ${current ? chalk.green('on') : chalk.dim('off')}`) +
+              chalk.dim('  (gunakan /memory auto on | off)\n')
+            );
+          }
+
+        } else {
+          console.log(chalk.cyan('\nPerintah /memory:'));
+          console.log(chalk.dim('  /memory review          ') + chalk.white('Tampilkan 20 memory entries terakhir'));
+          console.log(chalk.dim('  /memory save <teks>     ') + chalk.white('Simpan memory manual'));
+          console.log(chalk.dim('  /memory forget <id>     ') + chalk.white('Hapus memory berdasarkan ID'));
+          console.log(chalk.dim('  /memory auto on|off     ') + chalk.white('Aktifkan/nonaktifkan auto-extraction saat /exit'));
+          console.log(chalk.dim('  /memory auto            ') + chalk.white('Lihat status auto-extraction'));
+          console.log('');
+        }
+        break;
+      }
+
       default:
         Renderer.printStatus(`Perintah tidak dikenal: ${command}. Ketik /help untuk bantuan.`, 'error');
         console.log('');
@@ -1031,4 +1203,149 @@ export class ChatUI {
   private displayHelp() {
     Renderer.renderHelpMenu();
   }
+
+  // ─── Memory Extraction ──────────────────────────────────────────────────
+
+  /**
+   * Ekstrak preferensi dari riwayat sesi dan simpan ke SQLite.
+   *
+   * Dipicu oleh:
+   * - /exit dan /quit (normal exit)
+   * - SIGINT handler (Ctrl+C)
+   *
+   * Guard:
+   * - Tidak berjalan jika flag memoryAutoExtract = false
+   * - Tidak berjalan jika client belum init atau < 2 pesan
+   * - Timeout 12 detik — jika habis, exit tetap normal
+   * - Deduplication: skip kandidat yang mirip dengan entry existing
+   * - Conflict detection: tampilkan warning jika ada preferensi bertentangan
+   */
+  private async extractAndSaveSessionMemory(): Promise<void> {
+    try {
+      // 1. Cek flag
+      const enabled = await this.configManager.getFlag('memoryAutoExtract').catch(() => true);
+      if (!enabled) return;
+
+      // 2. Cek client dan minimum konten
+      if (!this.client) return;
+      const chatMessages = this.messages.filter(m => m.role === 'user' || m.role === 'assistant');
+      if (chatMessages.length < 2) return;
+
+      console.log('');
+      Renderer.printStatus(`Memory Extraction — menganalisis ${chatMessages.length} pesan...`, 'info');
+
+      // 3. Jalankan extractor
+      const fastModelId = await this.configManager.getModelForMode('fast');
+      console.log(chalk.dim(`  Model: ${fastModelId}`));
+
+      const extractor = new MemoryExtractor();
+      const candidates = await extractor.extract({
+        client:   this.client,
+        modelId:  fastModelId,
+        messages: this.messages,
+      });
+
+      if (candidates.length === 0) {
+        console.log(chalk.dim('  [Memory] LLM tidak menemukan preferensi yang layak disimpan dari sesi ini.'));
+        console.log('');
+        return;
+      }
+
+      // Tampilkan semua kandidat yang diekstrak LLM
+      console.log(chalk.cyan(`\n  [Memory] LLM menemukan ${candidates.length} kandidat:`));
+      for (const c of candidates) {
+        const confBar = c.confidence >= 0.80 ? chalk.green('▓▓▓') :
+                        c.confidence >= 0.65 ? chalk.yellow('▓▓░') : chalk.dim('▓░░');
+        console.log(
+          `    ${confBar} [${chalk.yellow(c.type)}/${c.scope}] conf=${chalk.cyan(c.confidence.toFixed(2))}\n` +
+          `       "${chalk.white(c.content.slice(0, 80))}${c.content.length > 80 ? '...' : ''}"`
+        );
+      }
+
+      // 4. Ambil existing entries untuk deduplication
+      const existing = await this.memoryManager.listMemoryEntries(100);
+      const existingNormalized = existing.map(e =>
+        e.content.toLowerCase().replace(/\s+/g, ' ').trim()
+      );
+
+      let saved = 0;
+      let skippedDup = 0;
+      let conflicts = 0;
+
+      console.log('');
+      for (const candidate of candidates) {
+        const candidateNorm = candidate.content.toLowerCase().replace(/\s+/g, ' ').trim();
+
+        // Deduplication check
+        const isDuplicate = existingNormalized.some(ex => {
+          if (Math.abs(ex.length - candidateNorm.length) > 100) return false;
+          const shorter = ex.length < candidateNorm.length ? ex : candidateNorm;
+          const longer  = ex.length < candidateNorm.length ? candidateNorm : ex;
+          return longer.includes(shorter) ||
+                 (shorter.length > 20 && longer.includes(shorter.slice(0, Math.floor(shorter.length * 0.8))));
+        });
+
+        if (isDuplicate) {
+          console.log(chalk.dim(`  [Memory] SKIP (duplikat): "${candidate.content.slice(0, 60)}..."`));
+          skippedDup++;
+          continue;
+        }
+
+        // Conflict detection
+        const sameTypeScopeEntries = existing.filter(
+          e => e.type === candidate.type && e.scope === (candidate.scope ?? 'project')
+        );
+        if (sameTypeScopeEntries.length > 0) {
+          const topicWords = candidateNorm.split(' ').filter(w => w.length > 4).slice(0, 3);
+          const possibleConflict = sameTypeScopeEntries.some(e =>
+            topicWords.some(word => e.content.toLowerCase().includes(word))
+          );
+          if (possibleConflict) {
+            conflicts++;
+            console.log(chalk.yellow(`  [Memory] ⚠ Potensi konflik preferensi — tetap disimpan, cek /memory review`));
+          }
+        }
+
+        // Simpan ke SQLite
+        await this.memoryManager.saveMemoryEntry({
+          type:       candidate.type,
+          content:    candidate.content,
+          timestamp:  Date.now(),
+          scope:      candidate.scope,
+          source:     'chat_extractor',
+          confidence: candidate.confidence,
+        });
+
+        console.log(chalk.green(`  [Memory] ✓ SAVED: "${candidate.content.slice(0, 70)}${candidate.content.length > 70 ? '...' : ''}"`));
+        saved++;
+      }
+
+      console.log('');
+
+      // Ringkasan
+      if (saved > 0) {
+        Renderer.printStatus(
+          `Memory: ${saved} preferensi disimpan, ${skippedDup} duplikat dilewati.`,
+          'success'
+        );
+      } else {
+        Renderer.printStatus(
+          `Memory: Semua kandidat dilewati (duplikat). Database sudah up-to-date.`,
+          'info'
+        );
+      }
+
+      if (conflicts > 0) {
+        Renderer.printStatus(
+          `[Memory] Terdeteksi ${conflicts} potensi konflik. Jalankan /memory review.`,
+          'warn'
+        );
+      }
+
+    } catch (err: any) {
+      // Tampilkan error agar user tahu kenapa tidak ada yang tersimpan
+      Renderer.printStatus(`[Memory] Extraction gagal: ${err?.message ?? 'unknown error'}`, 'warn');
+    }
+  }
+
 }

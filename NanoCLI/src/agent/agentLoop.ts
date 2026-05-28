@@ -266,8 +266,8 @@ export class AgentLoop {
         continue;
       }
 
-      // Jalankan action
-      const result = await this.stepRunner.run(action);
+      // Jalankan action — teruskan options agar permission policy di-enforce
+      const result = await this.stepRunner.run(action, options);
 
       // Track perubahan
       if (action.type === 'file.write' || action.type === 'file.patch') {
