@@ -50,15 +50,36 @@ export class TokenBudgetManager {
 
   /**
    * Mendapatkan budget token berdasarkan mode (sesuai PRD Bagian 12.5).
+   * Digunakan sebagai fallback ketika context_length model tidak diketahui.
    */
   getBudgetForMode(mode: string): number {
     const budgets: Record<string, number> = {
-      'fast': 4000,
-      'normal': 8000,
-      'high': 16000,
-      'extra-high': 32000
+      'fast': 4_000,
+      'normal': 8_000,
+      'high': 16_000,
+      'extra-high': 32_000
     };
-    return budgets[mode] || 8000;
+    return budgets[mode] ?? 8_000;
+  }
+
+  /**
+   * Mendapatkan budget token yang mempertimbangkan context_length model aktual.
+   *
+   * Strategi:
+   * - Gunakan 80% dari context window model sebagai budget maksimum.
+   * - Mode berperan sebagai cap atas (tidak melebihi batasan mode).
+   * - Selalu sediakan minimal 20% untuk output model.
+   *
+   * Contoh:
+   * - gemini-1.5-pro (1M ctx) + mode normal (8K cap) → 8K
+   * - claude-3-sonnet (200K ctx) + mode extra-high (32K cap) → 32K
+   * - llama-3-8b (8K ctx) + mode normal (8K cap) → 6.4K (80% dari 8K)
+   */
+  getBudgetForModel(contextLength: number, mode: string): number {
+    const modeCap = this.getBudgetForMode(mode);
+    // 80% dari context window untuk input, sisakan 20% untuk output
+    const modelSafeBudget = Math.floor(contextLength * 0.8);
+    return Math.min(modeCap, modelSafeBudget);
   }
 
   /**

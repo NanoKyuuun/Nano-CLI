@@ -8,6 +8,8 @@ import { Indexer } from './indexer';
 import { OpenRouterClient } from '../llm/openrouterClient';
 import { ConfigManager } from '../files/configManager';
 import { isSensitiveFile } from '../files/sensitiveFileBlocker';
+import { HomeServerClient } from '../remote/homeServerClient';
+import { SecretRedactor } from '../security/secretRedactor';
 
 /**
  * Extension allowlist untuk memory indexing.
@@ -31,12 +33,47 @@ export class MemoryManager {
   private nanocliDir: string;
   private indexer: Indexer;
   private configManager: ConfigManager;
+  /** Lazy-initialized — null berarti belum dicek atau tidak terkonfigurasi */
+  private homeClient: HomeServerClient | null | undefined = undefined;
+  private redactor = new SecretRedactor();
 
   constructor(projectRoot: string = process.cwd()) {
     this.projectRoot = projectRoot;
     this.nanocliDir = path.join(this.projectRoot, '.nanocli');
     this.indexer = new Indexer(projectRoot);
     this.configManager = new ConfigManager(projectRoot);
+  }
+
+  /**
+   * Inisialisasi HomeServerClient secara lazy.
+   * Dipanggil sekali — hasilnya di-cache di this.homeClient.
+   *
+   * SECURITY: Cek mode secara EKSPLISIT sebelum membuat client.
+   * Konten percakapan HANYA boleh dikirim ke remote di self-host mode.
+   *
+   * Kenapa perlu ini:
+   * - User bisa pernah setup self-host (remote config tersimpan di credentials.json)
+   * - Lalu switch ke share/local via 'nanocli remote setup' (mode berubah, config TIDAK otomatis dihapus)
+   * - Tanpa mode check, getHomeClient() akan return client → data bocor ke remote
+   */
+  private async getHomeClient(): Promise<HomeServerClient | null> {
+    if (this.homeClient !== undefined) return this.homeClient;
+
+    // Explicit mode check — ini source of truth yang benar
+    const mode = await this.configManager.getMode();
+    if (mode !== 'self-host') {
+      this.homeClient = null;
+      return null;
+    }
+
+    const remoteConfig = await this.configManager.getRemoteConfig();
+    if (!remoteConfig?.url || !remoteConfig?.apiKey) {
+      this.homeClient = null;
+      return null;
+    }
+
+    this.homeClient = new HomeServerClient(remoteConfig.url, remoteConfig.apiKey);
+    return this.homeClient;
   }
 
   async initProject(): Promise<void> {
@@ -147,9 +184,12 @@ export class MemoryManager {
         const content = rawBuffer.toString('utf-8');
         const hash = CryptoJS.MD5(content).toString();
 
-        // Cek apakah file berubah (logic sederhana: bandingkan hash di DB nanti)
-        // Untuk sekarang kita asumsikan perlu update jika belum ada di index
-        // (Implementasi pengecekan hash di Indexer akan lebih optimal di Task selanjutnya)
+        // P1: Hash check incremental — skip jika file tidak berubah
+        const existing = this.indexer.getFileByPath(relativePath);
+        if (existing && existing.hash === hash) {
+          skippedCount++;
+          continue; // Hash sama: tidak perlu re-index
+        }
         
         // Fix Bug 3.12: ganti dummy summary dengan heuristic extraction
         const summary = this.buildHeuristicSummary(relativePath, content);
@@ -177,7 +217,7 @@ export class MemoryManager {
 
   async searchMemory(query: string): Promise<void> {
     Renderer.printStatus(`Mencari konteks untuk: "${query}"...`, 'info');
-    
+
     try {
       await this.indexer.connect();
       const results = this.indexer.search(query);
@@ -189,20 +229,22 @@ export class MemoryManager {
 
       if (results.files.length > 0) {
         console.log(chalk.cyan('\nFile Proyek Relevan:'));
-        const fileRows = results.files.map((f: any) => [
+        const fileRows = results.files.map(f => [
           f.path,
-          f.summary.substring(0, 60) + (f.summary.length > 60 ? '...' : '')
+          `${(f.score * 100).toFixed(0)}%`,
+          f.summary.substring(0, 55) + (f.summary.length > 55 ? '...' : ''),
         ]);
-        Renderer.renderTable(['Path', 'Ringkasan'], fileRows);
+        Renderer.renderTable(['Path', 'Score', 'Ringkasan'], fileRows);
       }
 
       if (results.memory.length > 0) {
         console.log(chalk.cyan('\nEntri Memori Relevan:'));
-        const memoryRows = results.memory.map((m: any) => [
+        const memoryRows = results.memory.map(m => [
           m.type.toUpperCase(),
-          m.content.substring(0, 60).replace(/\n/g, ' ') + (m.content.length > 60 ? '...' : '')
+          `${(m.score * 100).toFixed(0)}%`,
+          m.content.substring(0, 55).replace(/\n/g, ' ') + (m.content.length > 55 ? '...' : ''),
         ]);
-        Renderer.renderTable(['Tipe', 'Konten'], memoryRows);
+        Renderer.renderTable(['Tipe', 'Score', 'Konten'], memoryRows);
       }
 
     } catch (error: any) {
@@ -212,33 +254,251 @@ export class MemoryManager {
     }
   }
 
-  async getContextForQuery(query: string): Promise<string> {
+  /**
+   * Kumpulkan konteks relevan dari local SQLite + remote home server,
+   * lalu re-rank secara global berdasarkan score sebelum diinjeksi ke LLM.
+   *
+   * Pipeline:
+   * 1. Local FTS5 search (BM25 score 0–1)
+   * 2. Remote semantic search (cosine similarity 0–1)
+   * 3. Merge ke array unified
+   * 4. Dedup berdasarkan content fingerprint
+   * 5. Sort descending by score
+   * 6. Potong berdasarkan maxChars budget
+   * 7. Format terstruktur untuk LLM
+   *
+   * @param query    Teks query untuk mencari konteks relevan
+   * @param maxChars Batas karakter total context (default 4000 ≈ ~1000 tokens)
+   */
+  async getContextForQuery(query: string, maxChars = 12_000): Promise<string> {
+    interface ContextEntry {
+      score:   number;
+      source:  'local-file' | 'local-memory' | 'remote';
+      type:    string;
+      content: string;
+    }
+
+    const entries: ContextEntry[] = [];
+
+    // ── 1. Local FTS5 search ────────────────────────────────────────
     try {
       await this.indexer.connect();
       const results = this.indexer.search(query);
-      
-      let context = '';
-      
-      if (results.files.length > 0) {
-        context += '\nRelevant Project Files:\n';
-        results.files.forEach((f: any) => {
-          context += `- ${f.path}: ${f.summary}\n`;
-        });
+
+      let filesReadCount = 0;
+      const MAX_FILES_TO_READ = 6;
+      const MAX_CHARS_PER_FILE = 3000;
+
+      for (const f of results.files) {
+        let fileContent = '';
+        let wasRead = false;
+
+        if (filesReadCount < MAX_FILES_TO_READ) {
+          const fullPath = path.join(this.projectRoot, f.path);
+          try {
+            if (await fs.pathExists(fullPath)) {
+              const stat = await fs.stat(fullPath);
+              if (stat.size <= 200_000) {
+                let content = await fs.readFile(fullPath, 'utf-8');
+                if (content.length > MAX_CHARS_PER_FILE) {
+                  content = content.slice(0, MAX_CHARS_PER_FILE) + '\n\n[... File Truncated ...]';
+                }
+                fileContent = content;
+                wasRead = true;
+                filesReadCount++;
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        if (wasRead) {
+          const ext = path.extname(f.path).toLowerCase();
+          const lang = ext.startsWith('.') ? ext.slice(1) : 'text';
+          entries.push({
+            score:   f.score,
+            source:  'local-file',
+            type:    'FILE',
+            content: `[FILE: ${f.path}]\n\`\`\`${lang}\n${fileContent}\n\`\`\``,
+          });
+        } else {
+          entries.push({
+            score:   f.score,
+            source:  'local-file',
+            type:    'FILE',
+            content: `${f.path} — ${f.summary}`,
+          });
+        }
       }
 
-      if (results.memory.length > 0) {
-        context += '\nRelevant Project Memory:\n';
-        results.memory.forEach((m: any) => {
-          context += `[${m.type.toUpperCase()}] ${m.content}\n`;
+      for (const m of results.memory) {
+        entries.push({
+          score:   m.score,
+          source:  'local-memory',
+          type:    m.type.toUpperCase(),
+          content: m.content,
         });
       }
-
-      return context.trim();
-    } catch (error) {
-      return '';
+    } catch {
+      // ignore — local search tidak harus ada
     } finally {
       this.indexer.close();
     }
+
+    // ── 2. Remote semantic search ───────────────────────────────────
+    try {
+      const client = await this.getHomeClient();
+      if (client) {
+        const projectName = await this.configManager.getProjectName();
+        const remoteResults = await client.search({
+          query,
+          project_name: projectName,
+          limit: 8,
+          include_memory:        true,
+          include_conversations: true,
+          min_similarity:        0.3,
+        });
+
+        if (remoteResults?.results) {
+          for (const r of remoteResults.results) {
+            entries.push({
+              score:   r.similarity,
+              source:  'remote',
+              type:    (r.type ?? r.source ?? 'MEMORY').toUpperCase(),
+              content: r.content.slice(0, 600),
+            });
+          }
+        }
+      }
+    } catch {
+      // Remote search gagal — context lokal tetap dipakai
+    }
+
+    if (entries.length === 0) return '';
+
+    // ── 3. Global re-ranking ────────────────────────────────────────
+    entries.sort((a, b) => b.score - a.score);
+
+    // ── 4. Dedup berdasarkan content fingerprint (first 120 chars) ──
+    const seen = new Set<string>();
+    const deduped = entries.filter(e => {
+      const fingerprint = e.content.slice(0, 120).toLowerCase().replace(/\s+/g, ' ');
+      if (seen.has(fingerprint)) return false;
+      seen.add(fingerprint);
+      return true;
+    });
+
+    // ── 5. Build context dengan token budget ───────────────────────
+    const lines: string[] = [];
+    let totalChars = 0;
+
+    for (const entry of deduped) {
+      let line = '';
+      if (entry.source === 'local-file' && entry.content.startsWith('[FILE:')) {
+        line = entry.content;
+      } else {
+        const sourceTag = entry.source === 'remote' ? '~remote' : '';
+        line = `[${entry.type}${sourceTag}] ${entry.content}`;
+      }
+
+      if (totalChars + line.length > maxChars) break;
+      lines.push(line);
+      totalChars += line.length + 1; // +1 untuk newline
+    }
+
+    if (lines.length === 0) return '';
+
+    // ── 6. Structured format untuk LLM ────────────────────────
+    const header = `--- Project Memory (${lines.length} entries, sorted by relevance) ---`;
+    const rawContext = `${header}\n${lines.join('\n')}\n---`;
+
+    // Redact sebelum dikembalikan ke LLM
+    return this.redactor.redact(rawContext);
+  }
+
+
+  /**
+   * Menyimpan satu entri ke tabel memory_entries di SQLite.
+   *
+   * Digunakan oleh pipeline command (debug, plan) untuk mencatat secara otomatis:
+   * - Bug yang ditemukan beserta solusinya (tipe: 'bug')
+   * - Rencana implementasi / keputusan arsitektur (tipe: 'decision')
+   * - Info lain sesuai MemoryEntryType
+   *
+   * Koneksi dibuka dan ditutup per-call untuk menghindari state terbuka.
+   */
+  async saveMemoryEntry(entry: {
+    type: string;
+    content: string;
+    sourceFile?: string;
+    timestamp: number;
+  }): Promise<void> {
+    // Redact secrets sebelum simpan ke mana pun
+    const safeContent = this.redactor.redact(entry.content);
+
+    // 1. Simpan ke SQLite lokal
+    try {
+      await this.indexer.connect();
+      this.indexer.addMemoryEntry({
+        type: entry.type,
+        content: safeContent,
+        ...(entry.sourceFile !== undefined && { sourceFile: entry.sourceFile }),
+        timestamp: entry.timestamp,
+      });
+    } finally {
+      this.indexer.close();
+    }
+
+    // 2. Fire-and-forget upload ke home server (tidak block caller)
+    this.getHomeClient().then(async client => {
+      if (!client) return;
+      const projectName = await this.configManager.getProjectName();
+      client.ingestMemoryEntry({
+        type: entry.type as any,
+        content: safeContent,
+        ...(entry.sourceFile && { source_file: entry.sourceFile }),
+        project_name: projectName,
+      });
+    }).catch(() => { /* silent */ });
+  }
+
+  /**
+   * Simpan rating feedback dari user ke SQLite lokal + fire-and-forget ke home server.
+   * Rating ini adalah training signal untuk pengembangan model LLM.
+   *
+   * @param rating 1=good, -1=bad, 0=skip/neutral
+   */
+  async saveFeedback(feedback: {
+    sessionId: string;
+    responsePreview: string;
+    rating: 1 | -1 | 0;
+    promptPreview?: string;
+    modelId?: string;
+  }): Promise<void> {
+    const timestamp = Date.now();
+
+    // 1. Simpan ke SQLite lokal
+    try {
+      await this.indexer.connect();
+      this.indexer.saveFeedback({ ...feedback, timestamp });
+    } finally {
+      this.indexer.close();
+    }
+
+    // 2. Fire-and-forget upload ke home server
+    this.getHomeClient().then(async client => {
+      if (!client) return;
+      const projectName = await this.configManager.getProjectName();
+      client.ingestFeedback({
+        session_id: feedback.sessionId,
+        response_preview: feedback.responsePreview,
+        rating: feedback.rating,
+        ...(feedback.promptPreview && { prompt_preview: feedback.promptPreview }),
+        ...(feedback.modelId && { model_id: feedback.modelId }),
+        ...(projectName && { project_name: projectName }),
+      });
+    }).catch(() => { /* silent */ });
   }
 
   private async createFileFromTemplate(relativePath: string, content: string) {
@@ -264,13 +524,31 @@ export class MemoryManager {
       parts.push(`Classes: ${classes.join(', ')}`);
     }
 
-    // Extract function/method names (function keyword dan arrow functions)
-    const funcs = content.match(/(?:async\s+)?function\s+(\w+)|(?:async\s+)?(\w+)\s*\([^)]*\)\s*(?::\s*\S+)?\s*(?:=>|{)/g)
-      ?.map(m => m.split(/[\s(]/)[0]!.replace(/^async\s*/, ''))
-      .filter(name => name && !['if', 'for', 'while', 'switch', 'catch'].includes(name))
-      .slice(0, 10);
-    if (funcs && funcs.length > 0) {
-      parts.push(`Functions: ${funcs.join(', ')}`);
+    // Extract function/method names menggunakan pattern yang lebih spesifik
+    // BUG-04 fix: regex sebelumnya terlalu broad (\ w+\s*\() menangkap bukan-fungsi.
+    // Sekarang hanya match: named function declarations, async functions, dan class methods.
+    const KEYWORD_BLACKLIST = new Set([
+      'if', 'for', 'while', 'switch', 'catch', 'return', 'new', 'delete',
+      'typeof', 'instanceof', 'void', 'throw', 'await', 'yield', 'import',
+      'export', 'default', 'const', 'let', 'var', 'class', 'extends',
+      'constructor', 'super', 'this', 'from', 'of', 'in', 'do', 'else',
+    ]);
+    const funcs: string[] = [];
+    // Named function declarations: function foo(...) / async function foo(...)
+    const namedFnMatches = content.matchAll(/(?:^|\s)(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(/gm);
+    for (const m of namedFnMatches) {
+      const name = m[1];
+      if (name && !KEYWORD_BLACKLIST.has(name)) funcs.push(name);
+    }
+    // Class method declarations: public/private/protected async methodName(
+    const methodMatches = content.matchAll(/^\s+(?:(?:public|private|protected|static|async|override|readonly|abstract)\s+)*([a-z_$][\w$]*)\s*\(/gm);
+    for (const m of methodMatches) {
+      const name = m[1];
+      if (name && !KEYWORD_BLACKLIST.has(name) && !funcs.includes(name)) funcs.push(name);
+    }
+    const topFuncs = funcs.slice(0, 10);
+    if (topFuncs.length > 0) {
+      parts.push(`Functions: ${topFuncs.join(', ')}`);
     }
 
     // Extract top-level imports (module names)

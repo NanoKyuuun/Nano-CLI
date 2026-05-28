@@ -1,6 +1,8 @@
+import path from 'path';
 import chalk from 'chalk';
 import { ConfigManager } from '../files/configManager';
 import { OpenRouterClient, Message } from '../llm/openrouterClient';
+import { MemoryManager } from '../memory/memoryManager';
 import { TokenBudgetManager } from '../tokens/tokenBudgetManager';
 import { ContextCompactor } from '../context/contextCompactor';
 import { StatsManager } from '../tokens/statsManager';
@@ -8,20 +10,28 @@ import { ModelManager } from '../llm/modelManager';
 import { Renderer } from '../ui/render';
 import { isValidMode, VALID_MODES } from '../config/modes';
 import { safeReadTextFile } from '../files/safeFileReader';
+import { PatchApplicator } from '../file/patchApplicator';
+import { FileOperationManager } from '../file/fileOperationManager';
 
 export class PatchCommand {
   private configManager: ConfigManager;
+  private memoryManager: MemoryManager;
   private tokenManager: TokenBudgetManager;
   private compactor: ContextCompactor;
   private statsManager: StatsManager;
   private modelManager: ModelManager;
+  private patchApplicator: PatchApplicator;
+  private fileManager: FileOperationManager;
 
   constructor(projectRoot: string = process.cwd()) {
     this.configManager = new ConfigManager(projectRoot);
+    this.memoryManager = new MemoryManager(projectRoot);
     this.tokenManager = new TokenBudgetManager();
     this.compactor = new ContextCompactor();
     this.statsManager = new StatsManager(projectRoot);
     this.modelManager = new ModelManager(projectRoot);
+    this.patchApplicator = new PatchApplicator();
+    this.fileManager = new FileOperationManager(projectRoot);
   }
 
   async execute(filePath: string, instruction: string, options: any) {
@@ -68,17 +78,32 @@ Your goal is to:
 Provide the patch/updated code inside a Markdown code block.`
     });
 
-    // 2. Add File and Instruction Context
+    // 2. Project Context — enriched query: style, patterns, dan implementation hints
+    const enrichedPatchQuery = [
+      instruction.slice(0, 200),
+      `implementation pattern refactoring coding style`,
+      // BUG-07 fix: gunakan path yang sudah diimport di atas, bukan require() inline
+      `file ${path.basename(fileName)}`,
+    ].join(' ');
+    const context = await this.memoryManager.getContextForQuery(enrichedPatchQuery);
+    if (context) {
+      messages.push({
+        role: 'system',
+        content: `Project Context (coding style, decisions to guide patch):\n${context}`
+      });
+    }
+
+    // 3. Add File and Instruction Context
     messages.push({
       role: 'user',
       content: `File: ${fileName}\nInstruction: ${instruction}\n\nCurrent Content:\n\`\`\`\n${fileContent}\n\`\`\``
     });
 
-    // 3. Compact Context
-    const compactedMessages = this.compactor.compactMessages(messages, mode);
-
-    // 4. Cost Guard Info
+    // 4. Fetch model metadata dan compact dengan model-aware budget
     const modelMetadata = await this.modelManager.getModel(modelId);
+    const compactedMessages = this.compactor.compactMessages(messages, mode, modelMetadata?.context_length);
+
+    // 5. Cost Guard Info
     if (modelMetadata) {
       const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
       const estimatedCost = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, 1000);
@@ -105,7 +130,30 @@ Provide the patch/updated code inside a Markdown code block.`
       }
       process.stdout.write('\n\n');
 
-      // 6. Log Usage
+      // 7. Jika --apply diberikan, terapkan patch ke file
+      if (options.apply) {
+        Renderer.printStatus('Mengekstrak dan menerapkan patch...', 'info');
+        const ext = path.extname(filePath);
+        const extracted = this.patchApplicator.extract(fullResponse, ext);
+
+        if (!extracted) {
+          Renderer.printStatus('Tidak bisa mengekstrak patch dari respons AI. Pastikan AI menghasilkan code block.', 'error');
+        } else {
+          const newContent = this.patchApplicator.apply(fileContent, extracted);
+          if (!newContent) {
+            Renderer.printStatus('Patch gagal diapply. Coba dengan instruksi yang lebih spesifik.', 'error');
+          } else {
+            const writeResult = await this.fileManager.write(filePath, newContent, 'overwrite', {
+              requireApproval: true,
+              reason: instruction.slice(0, 80),
+              showDiff: true,
+            });
+            this.fileManager.printResult(writeResult);
+          }
+        }
+      }
+
+      // 8. Log Usage
       if (modelMetadata) {
         const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
         const outputTokens = this.tokenManager.countTextTokens(fullResponse);

@@ -1,0 +1,49 @@
+# .ragignore
+# File dan folder yang TIDAK boleh masuk RAG (local SQLite maupun remote server).
+# Syntax mengikuti .gitignore.
+
+# ─── Environment & Credentials ───────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ─── NanoCLI internal state ──────────────────────────────────────────────────
+.nanocli/
+.git/
+
+# ─── Build artifacts & deps ──────────────────────────────────────────────────
+node_modules/
+dist/
+build/
+.next/
+vendor/
+__pycache__/
+
+# ─── Key files / certificates ────────────────────────────────────────────────
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ─── SSH ─────────────────────────────────────────────────────────────────────
+id_rsa
+id_ed25519
+*.pub
+
+# ─── Credentials ─────────────────────────────────────────────────────────────
+credentials.json
+.credentials.json
+secrets.json
+secret.json
+
+# ─── Database dumps ──────────────────────────────────────────────────────────
+*.sqlite
+*.db
+*.dump
+*.bak
+dump.sql
+backup.sql
+
+# ─── Logs ────────────────────────────────────────────────────────────────────
+*.log

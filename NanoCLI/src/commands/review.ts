@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import { ConfigManager } from '../files/configManager';
 import { OpenRouterClient, Message } from '../llm/openrouterClient';
+import { MemoryManager } from '../memory/memoryManager';
 import { TokenBudgetManager } from '../tokens/tokenBudgetManager';
 import { ContextCompactor } from '../context/contextCompactor';
 import { StatsManager } from '../tokens/statsManager';
@@ -11,6 +12,7 @@ import { safeReadTextFile } from '../files/safeFileReader';
 
 export class ReviewCommand {
   private configManager: ConfigManager;
+  private memoryManager: MemoryManager;
   private tokenManager: TokenBudgetManager;
   private compactor: ContextCompactor;
   private statsManager: StatsManager;
@@ -18,6 +20,7 @@ export class ReviewCommand {
 
   constructor(projectRoot: string = process.cwd()) {
     this.configManager = new ConfigManager(projectRoot);
+    this.memoryManager = new MemoryManager(projectRoot);
     this.tokenManager = new TokenBudgetManager();
     this.compactor = new ContextCompactor();
     this.statsManager = new StatsManager(projectRoot);
@@ -69,17 +72,37 @@ export class ReviewCommand {
 Provide your feedback in a structured Markdown format with clear headings.`
     });
 
-    // 2. Add File Context
+    // 2. Project Context — enriched query: coding style, patterns, known issues
+    const fileExt = fileName.split('.').pop() ?? '';
+    const langMap: Record<string, string> = {
+      ts: 'TypeScript', tsx: 'TypeScript React', js: 'JavaScript',
+      py: 'Python', go: 'Go', rs: 'Rust', php: 'PHP',
+    };
+    const lang = langMap[fileExt] ?? fileExt;
+    const enrichedReviewQuery = [
+      `code review style patterns best practices ${lang}`,
+      `architecture decision convention rule`,
+      `file ${fileName}`,
+    ].join(' ');
+    const context = await this.memoryManager.getContextForQuery(enrichedReviewQuery);
+    if (context) {
+      messages.push({
+        role: 'system',
+        content: `Project Context (coding style, decisions, known bugs):\n${context}`
+      });
+    }
+
+    // 3. Add File Context
     messages.push({
       role: 'user',
       content: `Please review this file: ${fileName}\n\nContent:\n\`\`\`\n${fileContent}\n\`\`\``
     });
 
-    // 3. Compact Context
-    const compactedMessages = this.compactor.compactMessages(messages, mode);
-
-    // 4. Cost Guard Info
+    // 4. Fetch model metadata dan compact dengan model-aware budget
     const modelMetadata = await this.modelManager.getModel(modelId);
+    const compactedMessages = this.compactor.compactMessages(messages, mode, modelMetadata?.context_length);
+
+    // 5. Cost Guard Info
     if (modelMetadata) {
       const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
       const estimatedCost = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, 1000);

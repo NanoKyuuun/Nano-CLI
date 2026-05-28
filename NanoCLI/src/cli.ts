@@ -15,6 +15,13 @@ import { TestCommand } from './commands/test';
 import { PlanCommand } from './commands/plan';
 import { PatchCommand } from './commands/patch';
 import { SearchCommand } from './commands/search';
+import { HomeServerClient } from './remote/homeServerClient';
+import { RemoteSetupUI } from './ui/remoteSetupUI';
+import { TerminalCommand } from './commands/terminal';
+import { WriteCommand } from './commands/write';
+import { GenerateCommand } from './commands/generate';
+import { UndoCommand } from './commands/undo';
+import { AgentCommand } from './commands/agent';
 
 const program = new Command();
 const configManager = new ConfigManager();
@@ -31,6 +38,11 @@ const testCommand = new TestCommand();
 const planCommand = new PlanCommand();
 const patchCommand = new PatchCommand();
 const searchCommand = new SearchCommand();
+const terminalCommand = new TerminalCommand();
+const writeCommand = new WriteCommand();
+const generateCommand = new GenerateCommand();
+const undoCommand = new UndoCommand();
+const agentCommand = new AgentCommand();
 
 program
   .name('nanocli')
@@ -48,7 +60,9 @@ async function checkOnboarding(cmdObj: any) {
       'Silakan jalankan:',
       'nanocli setup'
     ], 'yellow');
-    process.exit(0);
+    // BUG-08 fix: exit(1) bukan exit(0) — API key belum dikonfigurasi adalah kondisi error.
+    // exit(0) menandakan sukses ke shell/CI, membuat kondisi ini tidak terdeteksi oleh script.
+    process.exit(1);
   }
 }
 
@@ -146,6 +160,7 @@ program
   .argument('<prompt>', 'Deskripsi fitur yang ingin dibuat')
   .option('-m, --model <model-id>', 'Gunakan model spesifik')
   .option('--mode <mode>', 'Pilih mode', 'high')
+  .option('--out <path>', 'Simpan output ke file (misal: docs/PLAN.md)')
   .action(async (prompt, options, cmd) => {
     await checkOnboarding(cmd);
     await planCommand.execute(prompt, options);
@@ -153,14 +168,65 @@ program
 
 program
   .command('patch')
-  .description('Beri saran patch untuk file')
+  .description('Beri saran patch untuk file, atau terapkan langsung dengan --apply')
   .argument('<file>', 'Path ke file target')
   .argument('<instruction>', 'Instruksi perubahan')
   .option('-m, --model <model-id>', 'Gunakan model spesifik')
   .option('--mode <mode>', 'Pilih mode', 'normal')
+  .option('--apply', 'Terapkan patch ke file setelah generate (dengan approval)')
   .action(async (file, instruction, options, cmd) => {
     await checkOnboarding(cmd);
     await patchCommand.execute(file, instruction, options);
+  });
+
+program
+  .command('write')
+  .description('Buat atau timpa file dari prompt AI')
+  .argument('<path>', 'Path file yang akan dibuat')
+  .argument('<prompt>', 'Deskripsi konten yang diinginkan')
+  .option('-m, --model <model-id>', 'Gunakan model spesifik')
+  .option('--mode <mode>', 'Pilih mode', 'high')
+  .option('--overwrite', 'Izinkan menimpa file yang sudah ada')
+  .action(async (filePath, prompt, options, cmd) => {
+    await checkOnboarding(cmd);
+    await writeCommand.execute(filePath, prompt, options);
+  });
+
+program
+  .command('generate')
+  .description('Generate dokumen proyek terstruktur (prd, implementation, tasks, readme, api-spec)')
+  .argument('<type>', 'Tipe dokumen: prd | implementation | tasks | readme | api-spec')
+  .argument('[topic]', 'Topik atau fitur yang ingin didokumentasikan')
+  .option('-m, --model <model-id>', 'Gunakan model spesifik')
+  .option('--mode <mode>', 'Pilih mode', 'high')
+  .option('--out <path>', 'Path output file (default: docs/)')
+  .action(async (type, topic, options, cmd) => {
+    await checkOnboarding(cmd);
+    await generateCommand.execute(type, topic ?? '', options);
+  });
+
+program
+  .command('undo')
+  .description('Batalkan operasi file terakhir (restore dari backup)')
+  .option('--list', 'Tampilkan daftar semua backup yang tersedia')
+  .action(async (options, cmd) => {
+    await checkOnboarding(cmd);
+    await undoCommand.execute(options);
+  });
+
+program
+  .command('agent')
+  .description('Jalankan workflow agentik multi-step')
+  .argument('<task>', 'Task yang ingin diselesaikan oleh agent')
+  .option('-m, --model <model-id>', 'Gunakan model spesifik')
+  .option('--mode <mode>', 'Pilih mode', 'high')
+  .option('--max-steps <n>', 'Jumlah maksimum langkah agent', '8')
+  .option('--permission <level>', 'Level permission: workspace | full', 'workspace')
+  .option('--dry-run', 'Tampilkan proposal tanpa eksekusi')
+  .option('--verbose', 'Tampilkan output detail setiap step')
+  .action(async (task, options, cmd) => {
+    await checkOnboarding(cmd);
+    await agentCommand.execute(task, options);
   });
 
 const memory = program.command('memory').description('Manajemen Project Memory');
@@ -346,6 +412,210 @@ auth
     await configManager.deleteApiKey();
     Renderer.printStatus('Kredensial lokal telah dihapus.', 'success');
   });
+
+// ─── Remote Commands ────────────────────────────────────────────────────
+
+const remote = program
+  .command('remote')
+  .description('Manage NanoCLI connection mode (local / share / self-host)');
+
+remote
+  .command('setup')
+  .description('Interactive wizard: configure connection mode')
+  .action(async () => {
+    const ui = new RemoteSetupUI(process.cwd());
+    await ui.startSetup();
+  });
+
+remote
+  .command('status')
+  .description('Show current connection mode and server status')
+  .action(async () => {
+    const ui = new RemoteSetupUI(process.cwd());
+    await ui.showStatus();
+  });
+
+remote
+  .command('switch')
+  .description('Switch connection mode (alias for: nanocli remote setup)')
+  .action(async () => {
+    const ui = new RemoteSetupUI(process.cwd());
+    await ui.startSetup();
+  });
+
+remote
+  .command('clear')
+  .description('Reset to local mode and remove any remote configuration')
+  .action(async () => {
+    await configManager.setMode('local');
+    await configManager.saveRemoteConfig({ url: '', apiKey: '' });
+    console.log(chalk.green('\n  ✓ Reset to local mode. No network calls will be made.\n'));
+  });
+
+// ─── Terminal Commands ────────────────────────────────────────────────────────
+
+const terminal = program
+  .command('terminal')
+  .description('Secure Terminal Bridge — jalankan command lokal dengan approval dan redaction');
+
+terminal
+  .command('detect')
+  .description('Deteksi shell yang tersedia di sistem')
+  .action(async (options: any, cmd: any) => {
+    await checkOnboarding(cmd);
+    await terminalCommand.detect();
+  });
+
+terminal
+  .command('run')
+  .description('Jalankan command lokal dengan approval dan redaction')
+  .argument('<command>', 'Command yang akan dijalankan')
+  .option('--cwd <path>', 'Working directory')
+  .option('-y, --yes', 'Skip approval untuk command low-risk')
+  .option('--timeout <seconds>', 'Timeout dalam detik (default: 300)', '300')
+  .action(async (command: string, options: any, cmd: any) => {
+    await checkOnboarding(cmd);
+    await terminalCommand.run(command, options);
+  });
+
+// ─── Data Commands ────────────────────────────────────────────────────────────
+
+const data = program
+  .command('data')
+  .description('Inspect and analyze NanoCLI memory and usage data');
+
+data
+  .command('stats')
+  .description('Show memory statistics and usage analytics')
+  .action(async () => {
+    const { Indexer } = await import('./memory/indexer');
+
+    console.log('\n' + chalk.bold.cyan('┌' + '─'.repeat(56) + '┐'));
+    console.log(chalk.bold.cyan('│') + chalk.bold('  NanoCLI — Data Statistics'.padEnd(56)) + chalk.bold.cyan('│'));
+    console.log(chalk.bold.cyan('└' + '─'.repeat(56) + '┘') + '\n');
+
+    // ── Local SQLite stats ──────────────────────────────────────
+    console.log(chalk.bold.white('  Local Memory (SQLite)'));
+    console.log(chalk.dim('  ' + '─'.repeat(50)));
+
+    try {
+      const indexer = new Indexer(process.cwd());
+      await indexer.connect();
+      const local = indexer.getLocalStats();
+      indexer.close();
+
+      console.log(`  Files indexed    : ${chalk.cyan(local.filesIndexed.toLocaleString())}`);
+
+      const memTotal = Object.values(local.memoryByType).reduce((a, b) => a + b, 0);
+      if (memTotal > 0) {
+        const parts = Object.entries(local.memoryByType)
+          .sort(([, a], [, b]) => b - a)
+          .map(([t, c]) => `${t}:${c}`)
+          .join('  ');
+        console.log(`  Memory entries   : ${chalk.cyan(memTotal)} ${chalk.dim('(' + parts + ')')}`);
+      } else {
+        console.log(`  Memory entries   : ${chalk.dim('0 (run nanocli memory update)')}`);
+      }
+
+      if (local.feedbackTotal > 0) {
+        const goodPct = Math.round((local.feedbackGood / local.feedbackTotal) * 100);
+        console.log(`  Feedback ratings : ${chalk.cyan(local.feedbackTotal)}` +
+          `  ${chalk.green('▲ ' + local.feedbackGood)}` +
+          `  ${chalk.red('▼ ' + local.feedbackBad)}` +
+          `  ${chalk.dim('~ ' + local.feedbackNeutral)}` +
+          `  ${chalk.dim('(' + goodPct + '% good)')}`
+        );
+      } else {
+        console.log(`  Feedback ratings : ${chalk.dim('0 (no ratings yet)')}`);
+      }
+    } catch (err: any) {
+      // Bedakan antara DB belum ada (fresh install) vs error lain
+      const isFirstRun = err?.message?.includes('no such table') ||
+                         err?.code === 'SQLITE_ERROR'            ||
+                         !require('fs').existsSync(
+                           require('path').join(process.cwd(), '.nanocli', 'index', 'memory.sqlite')
+                         );
+      if (isFirstRun) {
+        console.log(chalk.dim('  No local data yet.') + chalk.dim(' → Run: nanocli memory update'));
+      } else {
+        console.log(chalk.yellow(`  ⚠  Local stats error: ${err?.message ?? 'unknown'}`));
+        console.log(chalk.dim('  Try: nanocli memory update'));
+      }
+    }
+
+    // ── Remote stats (hanya jika self-host mode) ────────────────
+    const mode = await configManager.getMode();
+
+    if (mode === 'self-host') {
+      const remoteConfig = await configManager.getRemoteConfig();
+      if (remoteConfig?.url && remoteConfig?.apiKey) {
+        console.log('\n' + chalk.bold.white('  Remote Analytics (Home Server)'));
+        console.log(chalk.dim('  ' + '─'.repeat(50)));
+
+        process.stdout.write(chalk.dim('  Fetching stats...'));
+        const client = new HomeServerClient(remoteConfig.url, remoteConfig.apiKey);
+        const stats = await client.getStats();
+
+        if (!stats) {
+          process.stdout.write(chalk.yellow(' ⚠ unreachable\n'));
+          console.log(chalk.dim('  Run: nanocli remote status'));
+        } else {
+          process.stdout.write(chalk.green(' ✓\n'));
+
+          console.log(`  Total events     : ${chalk.cyan(stats.total_events.toLocaleString())}`);
+
+          if (stats.total_feedback > 0) {
+            const goodPct = Math.round((stats.feedback_good / stats.total_feedback) * 100);
+            console.log(`  Feedback ratings : ${chalk.cyan(stats.total_feedback.toLocaleString())}` +
+              `  ${chalk.green('▲ ' + stats.feedback_good)}` +
+              `  ${chalk.red('▼ ' + stats.feedback_bad)}` +
+              `  ${chalk.dim('(' + goodPct + '% good)')}`
+            );
+          }
+
+          if (stats.avg_response_ms) {
+            console.log(`  Avg response     : ${chalk.cyan(Math.round(stats.avg_response_ms) + ' ms')}`);
+          }
+
+          console.log(`  Memory entries   : ${chalk.cyan(stats.total_memory_entries.toLocaleString())}`);
+          console.log(`  Conversations    : ${chalk.cyan(stats.total_conversation_turns.toLocaleString())}` +
+            `  ${chalk.dim('(' + stats.total_sessions + ' sessions)')}`
+          );
+
+          if (stats.top_commands.length > 0) {
+            console.log('\n  ' + chalk.bold('Top Commands:'));
+            stats.top_commands.slice(0, 5).forEach(cmd => {
+              const bar = '█'.repeat(Math.round(cmd.pct / 5));
+              console.log(`    ${cmd.command.padEnd(12)} ${chalk.cyan(bar)} ${cmd.pct}%  ${chalk.dim('(' + cmd.total + ')')}`);
+            });
+          }
+
+          if (stats.feedback_by_model.length > 0) {
+            console.log('\n  ' + chalk.bold('Feedback by Model:'));
+            stats.feedback_by_model.slice(0, 5).forEach(m => {
+              const pct = m.good_pct.toFixed(0);
+              const color = m.good_pct >= 70 ? chalk.green : m.good_pct >= 40 ? chalk.yellow : chalk.red;
+              console.log(`    ${m.model_id.split('/').pop()!.padEnd(30)} ${color(pct + '% good')}  ${chalk.dim('n=' + m.total)}`);
+            });
+          }
+
+          if (stats.data_since) {
+            const since = new Date(stats.data_since).toLocaleDateString();
+            console.log(chalk.dim(`\n  Data since: ${since}`));
+          }
+        }
+      }
+    } else if (mode === 'share') {
+      console.log('\n' + chalk.dim('  Remote analytics not available in Share mode.'));
+      console.log(chalk.dim('  Switch to self-host mode for full analytics: nanocli remote setup'));
+    } else {
+      console.log('\n' + chalk.dim('  Remote analytics: not configured (Local mode).'));
+      console.log(chalk.dim('  Run nanocli remote setup to configure a remote server.'));
+    }
+
+    console.log('');
+  });
+
 
 export async function run() {
   await program.parseAsync(process.argv);

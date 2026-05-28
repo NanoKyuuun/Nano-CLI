@@ -1,0 +1,46 @@
+# .aiignore
+# File dan folder yang TIDAK boleh dikirim ke model AI (OpenRouter).
+# Lebih ketat dari .ragignore — mencakup semua file yang bahkan
+# tidak boleh dibaca/di-inject ke system prompt.
+# Syntax mengikuti .gitignore.
+
+# ─── Environment & Credentials ───────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ─── NanoCLI internal ────────────────────────────────────────────────────────
+.nanocli/
+
+# ─── Cloud / infra credentials ───────────────────────────────────────────────
+.ssh/
+.aws/
+.config/gcloud/
+.azure/
+.kube/
+
+# ─── Key files / certificates ────────────────────────────────────────────────
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ─── Database / dumps ────────────────────────────────────────────────────────
+*.sqlite
+*.db
+*.dump
+*.bak
+
+# ─── Credential files ────────────────────────────────────────────────────────
+credentials.json
+.credentials.json
+secrets.json
+secret.json
+
+# ─── Shell history ───────────────────────────────────────────────────────────
+.bash_history
+.zsh_history
+.ps_history
+.mysql_history
+.psql_history

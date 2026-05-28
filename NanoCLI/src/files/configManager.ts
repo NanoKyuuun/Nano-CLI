@@ -3,6 +3,19 @@ import path from 'path';
 import os from 'os';
 import { NanoMode, ModelConfig, VALID_MODES } from '../config/modes';
 
+export interface RemoteConfig {
+  url: string;
+  apiKey: string;
+}
+
+/**
+ * Mode koneksi NanoCLI:
+ * - local     : hanya SQLite lokal, zero network
+ * - share     : lokal + kirim anonymous telemetry ke server owner
+ * - self-host : lokal + koneksi ke server RAG sendiri (full fitur)
+ */
+export type NanoCLIMode = 'local' | 'share' | 'self-host';
+
 export interface Config {
   provider: {
     name: string;
@@ -110,16 +123,117 @@ export class ConfigManager {
     return undefined;
   }
 
+  /**
+   * Mengambil konfigurasi remote RAG (URL + API Key home server).
+   * Disimpan di credentials global (~/.nanocli/credentials.json) agar tidak masuk git.
+   * Kembalikan null jika belum dikonfigurasi.
+   */
+  async getRemoteConfig(): Promise<RemoteConfig | null> {
+    try {
+      if (await fs.pathExists(this.credentialsPath)) {
+        const creds = await fs.readJson(this.credentialsPath);
+        if (creds.remote?.url && creds.remote?.apiKey) {
+          return creds.remote as RemoteConfig;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+
+  /**
+   * Simpan konfigurasi remote RAG ke credentials global.
+   * Digabung dengan apiKey yang sudah ada (tidak overwrite).
+   */
+  async saveRemoteConfig(remote: RemoteConfig): Promise<void> {
+    await fs.ensureDir(path.dirname(this.credentialsPath));
+    let existing: Record<string, unknown> = {};
+    if (await fs.pathExists(this.credentialsPath)) {
+      existing = await fs.readJson(this.credentialsPath);
+    }
+    await fs.writeJson(this.credentialsPath, { ...existing, remote }, { spaces: 2 });
+  }
+
+  /**
+   * Mendeteksi nama project dari package.json atau nama folder.
+   * Digunakan sebagai project_name saat upload ke home server.
+   */
+  async getProjectName(): Promise<string> {
+    const pkgPath = path.join(this.projectRoot, 'package.json');
+    if (await fs.pathExists(pkgPath)) {
+      try {
+        const pkg = await fs.readJson(pkgPath);
+        if (pkg.name && typeof pkg.name === 'string') {
+          return pkg.name;
+        }
+      } catch {
+        // fallback
+      }
+    }
+    // Fallback: nama folder project
+    return path.basename(this.projectRoot);
+  }
+
+  /**
+   * Ambil mode koneksi aktif: 'local' | 'share' | 'self-host'.
+   * Default: 'local' jika belum pernah di-set.
+   */
+  async getMode(): Promise<NanoCLIMode> {
+    try {
+      if (await fs.pathExists(this.credentialsPath)) {
+        const creds = await fs.readJson(this.credentialsPath);
+        const mode = creds.mode as NanoCLIMode | undefined;
+        if (mode === 'local' || mode === 'share' || mode === 'self-host') {
+          return mode;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return 'local'; // default
+  }
+
+  /**
+   * Simpan mode koneksi ke credentials global.
+   * Digabung dengan data credentials yang sudah ada.
+   */
+  async setMode(mode: NanoCLIMode): Promise<void> {
+    await fs.ensureDir(path.dirname(this.credentialsPath));
+    let existing: Record<string, unknown> = {};
+    if (await fs.pathExists(this.credentialsPath)) {
+      existing = await fs.readJson(this.credentialsPath);
+    }
+    await fs.writeJson(this.credentialsPath, { ...existing, mode }, { spaces: 2 });
+  }
+
   async saveApiKey(apiKey: string): Promise<void> {
     await fs.ensureDir(path.dirname(this.credentialsPath));
-    await fs.writeJson(this.credentialsPath, { apiKey }, { spaces: 2 });
+    // Baca data yang sudah ada agar remote config + mode tidak hilang
+    // (konsisten dengan saveRemoteConfig() dan setMode())
+    let existing: Record<string, unknown> = {};
+    if (await fs.pathExists(this.credentialsPath)) {
+      existing = await fs.readJson(this.credentialsPath);
+    }
+    await fs.writeJson(this.credentialsPath, { ...existing, apiKey }, { spaces: 2 });
 
     // Pastikan .nanocli/ ada di .gitignore project
     await this.ensureProjectGitignore();
   }
 
   async deleteApiKey(): Promise<void> {
-    if (await fs.pathExists(this.credentialsPath)) {
+    if (!(await fs.pathExists(this.credentialsPath))) return;
+
+    // Hanya hapus field 'apiKey' — pertahankan remote config dan mode
+    // agar self-host setup tidak hilang saat user reset API key.
+    const existing: Record<string, unknown> = await fs.readJson(this.credentialsPath);
+    const { apiKey: _removed, ...rest } = existing;
+
+    if (Object.keys(rest).length > 0) {
+      // Masih ada data lain (remote, mode) — simpan file tanpa apiKey
+      await fs.writeJson(this.credentialsPath, rest, { spaces: 2 });
+    } else {
+      // File sudah kosong — hapus seluruhnya
       await fs.remove(this.credentialsPath);
     }
   }
@@ -180,5 +294,27 @@ export class ConfigManager {
         saveSessions: true
       }
     };
+  }
+
+  /**
+   * Baca nilai flag boolean dari konfigurasi.
+   * Digunakan untuk preferensi user seperti feedback on/off.
+   */
+  async getFlag(key: string): Promise<boolean | undefined> {
+    const config = await this.getConfig() as any;
+    if (config.flags && typeof config.flags === 'object' && key in config.flags) {
+      return Boolean(config.flags[key]);
+    }
+    return undefined;
+  }
+
+  /**
+   * Simpan nilai flag boolean ke konfigurasi.
+   */
+  async setFlag(key: string, value: boolean): Promise<void> {
+    const config = await this.getConfig() as any;
+    if (!config.flags) config.flags = {};
+    config.flags[key] = value;
+    await this.saveConfig(config);
   }
 }

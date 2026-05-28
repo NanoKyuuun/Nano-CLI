@@ -69,22 +69,25 @@ export class AskCommand {
       : 'You are NanoCLI, an AI coding assistant. Be practical, precise, and concise.';
     messages.push({ role: 'system', content: systemContent });
 
-    // 2. Project Context jika diminta
-    if (options.project) {
-      const context = await this.memoryManager.getContextForQuery(prompt);
-      if (context) {
-        messages.push({ role: 'system', content: `Project Context:\n${context}` });
-      }
+    // 2. Project Context — enriched query agar FTS5 match dengan memory entries relevan
+    // Tambah domain hint 'question answer explanation' untuk hits yang lebih baik
+    const enrichedAskQuery = ['question answer explanation', prompt.slice(0, 300)].join(' ');
+    const context = await this.memoryManager.getContextForQuery(enrichedAskQuery);
+    if (context) {
+      messages.push({ role: 'system', content: `Project Context:\n${context}` });
     }
 
     // 3. User Prompt
     messages.push({ role: 'user', content: prompt });
 
-    // 4. Compact Context
-    const compactedMessages = this.compactor.compactMessages(messages, mode);
-
-    // 5. Cost Guard
+    // 4. Fetch model metadata untuk model-aware compaction dan cost guard
     const modelMetadata = await this.modelManager.getModel(modelId);
+
+    // 5. Compact Context — gunakan model-aware budget jika context_length tersedia
+    const modelContextLength = modelMetadata?.context_length;
+    const compactedMessages = this.compactor.compactMessages(messages, mode, modelContextLength);
+
+    // 6. Cost Guard
     if (modelMetadata) {
       const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
       const estimatedCost = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, 500);
@@ -93,7 +96,7 @@ export class AskCommand {
       }
     }
 
-    // 6. Stream Response
+    // 7. Stream Response
     process.stdout.write(chalk.cyan('\nNanoCLI: '));
     let fullResponse = '';
     try {
@@ -110,7 +113,7 @@ export class AskCommand {
       }
       process.stdout.write('\n\n');
 
-      // 7. Log Usage
+      // 8. Log Usage
       if (modelMetadata) {
         const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
         const outputTokens = this.tokenManager.countTextTokens(fullResponse);

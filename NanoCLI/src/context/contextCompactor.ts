@@ -14,39 +14,70 @@ export class ContextCompactor {
    * 1. Pertahankan System Prompt.
    * 2. Pertahankan N pesan terbaru.
    * 3. Hapus pesan di tengah jika masih over budget.
+   *
+   * @param messages - Daftar pesan yang akan dikompaksi.
+   * @param mode - Mode aktif (fast, normal, high, extra-high) untuk menentukan budget cap.
+   * @param modelContextLength - Context window model aktual (opsional). Jika diisi,
+   *   budget dihitung secara model-aware menggunakan getBudgetForModel().
    */
-  compactMessages(messages: Message[], mode: string): Message[] {
-    const budget = this.tokenManager.getBudgetForMode(mode);
+  compactMessages(messages: Message[], mode: string, modelContextLength?: number): Message[] {
+    return this.compactAndDiscard(messages, mode, modelContextLength).compacted;
+  }
+
+  compactAndDiscard(
+    messages: Message[],
+    mode: string,
+    modelContextLength?: number
+  ): { compacted: Message[]; discarded: Message[] } {
+    const budget = modelContextLength
+      ? this.tokenManager.getBudgetForModel(modelContextLength, mode)
+      : this.tokenManager.getBudgetForMode(mode);
+
     let currentTokens = this.tokenManager.countMessageTokens(messages);
 
     if (currentTokens <= budget) {
-      return this.deduplicateMessages(messages);
+      return { compacted: this.deduplicateMessages(messages), discarded: [] };
     }
 
-    // 1. Pisahkan system prompt
-    const systemMessages = messages.filter(m => m.role === 'system');
-    const otherMessages = messages.filter(m => m.role !== 'system');
+    if (messages.length <= 2) {
+      return { compacted: messages, discarded: [] };
+    }
 
-    // 2. Ambil pesan terbaru satu per satu sampai mendekati budget
-    const compacted: Message[] = [];
-    let tempTokens = this.tokenManager.countMessageTokens(systemMessages);
+    // 1. Pisahkan system prompt utama (indeks 0) jika ada
+    const systemPrompt = messages[0]?.role === 'system' ? messages[0] : null;
+    const chatMsgs = systemPrompt ? messages.slice(1) : messages;
 
+    // 2. Tentukan budget untuk chat messages
+    const systemTokens = systemPrompt ? this.tokenManager.countMessageTokens([systemPrompt]) : 0;
     // Sisakan ruang untuk pesan baru (misal 20% dari budget)
-    const safeBudget = budget * 0.8;
+    const chatBudget = (budget - systemTokens) * 0.8;
 
-    for (let i = otherMessages.length - 1; i >= 0; i--) {
-      const msg = otherMessages[i]!;
+    // 3. Ambil pesan terbaru dari kanan ke kiri
+    const keepList: Message[] = [];
+    const discardList: Message[] = [];
+    let tempTokens = 0;
+
+    // Pastikan kita mempertahankan minimal 2 pesan chat terakhir (user + assistant terakhir) jika ada
+    const minKeepCount = Math.min(chatMsgs.length, 2);
+
+    for (let i = chatMsgs.length - 1; i >= 0; i--) {
+      const msg = chatMsgs[i]!;
       const msgTokens = this.tokenManager.countTextTokens(msg.content) + 4;
-      
-      if (tempTokens + msgTokens < safeBudget) {
-        compacted.unshift(msg);
+
+      if (keepList.length < minKeepCount || tempTokens + msgTokens < chatBudget) {
+        keepList.unshift(msg);
         tempTokens += msgTokens;
       } else {
-        break;
+        discardList.unshift(msg);
       }
     }
 
-    return [...systemMessages, ...compacted];
+    const compacted = systemPrompt ? [systemPrompt, ...keepList] : keepList;
+
+    return {
+      compacted: this.deduplicateMessages(compacted),
+      discarded: discardList
+    };
   }
 
   /**

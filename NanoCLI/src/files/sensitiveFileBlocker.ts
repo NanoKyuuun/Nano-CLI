@@ -25,6 +25,15 @@ const SENSITIVE_EXACT_NAMES = new Set([
   'private.key',
   'private.pem',
   'service-account.json',
+  // Terminal / shell history — tidak boleh dikirim ke AI
+  '.bash_history',
+  '.zsh_history',
+  '.ps_history',
+  '.node_repl_history',
+  '.mysql_history',
+  '.psql_history',
+  '.python_history',
+  '.lesshst',
 ]);
 
 /**
@@ -37,13 +46,17 @@ const SENSITIVE_BASENAME_PATTERNS = [
   /password/i,
   /passwd/i,
   /private/i,
-  /token/i,
+  // WARN-06 fix: /token/i terlalu broad — memblokir tokenBudgetManager.ts, tokenizer.ts, dll.
+  // Diganti dengan pattern yang hanya match nama file credential/token yang sesungguhnya.
+  /^(api[-_]?token|auth[-_]?token|access[-_]?token|refresh[-_]?token|bearer[-_]?token)(\.(json|txt|env|yml|yaml))?$/i,
   /apikey/i,
   /api_key/i,
 ];
 
 /**
  * File extensions that are inherently sensitive.
+ * Catatan: .sql TIDAK termasuk di sini — ditangani secara khusus
+ * berdasarkan nama file (schema.sql aman, dump.sql berbahaya).
  */
 const SENSITIVE_EXTENSIONS = new Set([
   '.pem',
@@ -53,10 +66,24 @@ const SENSITIVE_EXTENSIONS = new Set([
   '.pfx',
   '.sqlite',
   '.db',
-  '.sql',
   '.dump',
   '.bak',
 ]);
+
+/**
+ * Nama file .sql yang mengandung pola berbahaya (data dump, backup, dll).
+ * File seperti schema.sql atau migration .sql diizinkan.
+ */
+const SENSITIVE_SQL_BASENAME_PATTERNS = [
+  /dump/i,
+  /backup/i,
+  /\bprod\b/i,
+  /production/i,
+  /\bdata\b/i,
+  /export/i,
+  /seed/i,
+  /restore/i,
+];
 
 /**
  * Path segments (normalized to forward slash, lowercase) that indicate
@@ -67,6 +94,10 @@ const SENSITIVE_PATH_SEGMENTS = [
   '/.aws/',
   '/.config/gcloud/',
   '/secrets/',
+  '/.kube/',
+  '/.azure/',
+  '/.terraform/',
+  '/terraform.tfstate',
 ];
 
 /**
@@ -87,7 +118,7 @@ export function isSensitiveFile(filePath: string): boolean {
   // 1. Exact filename match (case-insensitive)
   if (SENSITIVE_EXACT_NAMES.has(baseLower)) return true;
 
-  // 2. Extension match
+  // 2. Extension match (kecuali .sql — ditangani di langkah 5)
   if (SENSITIVE_EXTENSIONS.has(ext)) return true;
 
   // 3. Basename pattern match
@@ -95,6 +126,13 @@ export function isSensitiveFile(filePath: string): boolean {
 
   // 4. Sensitive directory path segment match
   if (SENSITIVE_PATH_SEGMENTS.some(seg => normalized.includes(seg))) return true;
+
+  // 5. Smart .sql handling — hanya blokir file SQL dengan nama berbahaya
+  //    schema.sql, migrations/*.sql → aman
+  //    dump.sql, backup_prod.sql, data_export.sql → blokir
+  if (ext === '.sql') {
+    if (SENSITIVE_SQL_BASENAME_PATTERNS.some(p => p.test(baseLower))) return true;
+  }
 
   return false;
 }

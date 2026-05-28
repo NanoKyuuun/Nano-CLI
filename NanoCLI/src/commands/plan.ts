@@ -1,3 +1,4 @@
+import path from 'path';
 import chalk from 'chalk';
 import { ConfigManager } from '../files/configManager';
 import { OpenRouterClient, Message } from '../llm/openrouterClient';
@@ -8,6 +9,7 @@ import { StatsManager } from '../tokens/statsManager';
 import { ModelManager } from '../llm/modelManager';
 import { Renderer } from '../ui/render';
 import { isValidMode, VALID_MODES } from '../config/modes';
+import { FileOperationManager } from '../file/fileOperationManager';
 
 export class PlanCommand {
   private configManager: ConfigManager;
@@ -16,6 +18,7 @@ export class PlanCommand {
   private compactor: ContextCompactor;
   private statsManager: StatsManager;
   private modelManager: ModelManager;
+  private fileManager: FileOperationManager;
 
   constructor(projectRoot: string = process.cwd()) {
     this.configManager = new ConfigManager(projectRoot);
@@ -24,10 +27,12 @@ export class PlanCommand {
     this.compactor = new ContextCompactor();
     this.statsManager = new StatsManager(projectRoot);
     this.modelManager = new ModelManager(projectRoot);
+    this.fileManager = new FileOperationManager(projectRoot);
   }
 
   async execute(prompt: string, options: any) {
     const mode = options.mode || 'high';
+    const outPath: string | undefined = options.out;
 
     if (!isValidMode(mode)) {
       Renderer.printStatus(`Mode tidak valid: "${mode}". Pilih salah satu: ${VALID_MODES.join(', ')}`, 'error');
@@ -59,8 +64,13 @@ Your plan should include:
 Use project context to ensure the plan aligns with existing architecture and tech stack.`
     });
 
-    // 2. Add Project Context
-    const context = await this.memoryManager.getContextForQuery(prompt);
+    // 2. Add Project Context — enriched query agar cocok dengan memory 'decision' entries
+    // Plan sangat diuntungkan dari konteks keputusan arsitektur sebelumnya
+    const enrichedPlanQuery = [
+      'architecture implementation plan design feature decision',
+      prompt.slice(0, 300),
+    ].join(' ');
+    const context = await this.memoryManager.getContextForQuery(enrichedPlanQuery);
     if (context) {
       messages.push({
         role: 'system',
@@ -71,15 +81,15 @@ Use project context to ensure the plan aligns with existing architecture and tec
     // 3. Add User Request
     messages.push({ role: 'user', content: `Plan this feature: ${prompt}` });
 
-    // 4. Compact Context
-    const compactedMessages = this.compactor.compactMessages(messages, mode);
-    
-    // 5. Cost Guard Info
+    // 4. Compact Context — model-aware budget
     const modelMetadata = await this.modelManager.getModel(modelId);
+    const compactedMessages = this.compactor.compactMessages(messages, mode, modelMetadata?.context_length);
+
+    // 5. Cost Guard Info
     if (modelMetadata) {
       const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
       const estimatedCost = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, 1500);
-      
+
       if (estimatedCost > 0.05) {
         Renderer.printStatus(`Estimasi biaya pembuatan plan: $${estimatedCost.toFixed(4)} USD.`, 'warn');
       }
@@ -88,7 +98,9 @@ Use project context to ensure the plan aligns with existing architecture and tec
     Renderer.printStatus(`Sedang menyusun rencana implementasi...`, 'info');
 
     // 6. Stream Response
-    process.stdout.write(chalk.blue('\nImplementation Plan:\n'));
+    if (!outPath) {
+      process.stdout.write(chalk.blue('\nImplementation Plan:\n'));
+    }
     let fullResponse = '';
     try {
       const stream = client.streamChat({
@@ -98,12 +110,33 @@ Use project context to ensure the plan aligns with existing architecture and tec
       });
 
       for await (const chunk of stream) {
-        process.stdout.write(chunk);
+        if (!outPath) process.stdout.write(chunk);
         fullResponse += chunk;
       }
-      process.stdout.write('\n\n');
+      if (!outPath) process.stdout.write('\n\n');
 
-      // 7. Log Usage
+      // 7. Auto-save plan summary ke memory_entries tipe 'decision' (P2.2)
+      try {
+        await this.memoryManager.saveMemoryEntry({
+          type: 'decision',
+          content: `[PLAN: ${prompt.slice(0, 100)}]\n${fullResponse.slice(0, 600)}`,
+          timestamp: Date.now()
+        });
+      } catch {
+        // Jangan crash jika memory save gagal — ini opsional
+      }
+
+      // 8. Tulis ke file jika --out diberikan
+      if (outPath) {
+        const result = await this.fileManager.write(outPath, fullResponse, 'create', {
+          requireApproval: true,
+          reason: `Implementation plan: ${prompt.slice(0, 60)}`,
+          showDiff: false,
+        });
+        this.fileManager.printResult(result);
+      }
+
+      // 9. Log Usage
       if (modelMetadata) {
         const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
         const outputTokens = this.tokenManager.countTextTokens(fullResponse);

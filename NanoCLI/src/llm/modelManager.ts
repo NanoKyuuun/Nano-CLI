@@ -19,6 +19,8 @@ export class ModelManager {
   private cachePath: string;
   private ttl: number = 24 * 60 * 60 * 1000; // 24 hours in ms
   private configManager: ConfigManager;
+  /** BUG-05 fix: in-memory cache agar getModels() tidak repeat disk/network per command. */
+  private inMemoryCache: ModelMetadata[] | null = null;
 
   constructor(projectRoot: string = process.cwd()) {
     this.cachePath = path.join(projectRoot, '.nanocli', 'cache', 'model_list.json');
@@ -26,9 +28,15 @@ export class ModelManager {
   }
 
   async getModels(forceRefresh: boolean = false): Promise<ModelMetadata[]> {
+    // BUG-05 fix: in-memory cache — skip disk I/O jika sudah ada di memori
+    if (!forceRefresh && this.inMemoryCache) {
+      return this.inMemoryCache;
+    }
+
     if (!forceRefresh && await this.isCacheValid()) {
       const cache = await fs.readJson(this.cachePath);
-      return cache.models;
+      this.inMemoryCache = cache.models;
+      return this.inMemoryCache!;
     }
 
     return await this.refreshModels();
@@ -58,6 +66,8 @@ export class ModelManager {
       models
     }, { spaces: 2 });
 
+    // Update in-memory cache setelah refresh
+    this.inMemoryCache = models;
     return models;
   }
 

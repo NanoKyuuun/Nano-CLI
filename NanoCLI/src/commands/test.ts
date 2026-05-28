@@ -3,6 +3,7 @@ import path from 'path';
 import chalk from 'chalk';
 import { ConfigManager } from '../files/configManager';
 import { OpenRouterClient, Message } from '../llm/openrouterClient';
+import { MemoryManager } from '../memory/memoryManager';
 import { TokenBudgetManager } from '../tokens/tokenBudgetManager';
 import { ContextCompactor } from '../context/contextCompactor';
 import { StatsManager } from '../tokens/statsManager';
@@ -13,6 +14,7 @@ import { safeReadTextFile } from '../files/safeFileReader';
 
 export class TestCommand {
   private configManager: ConfigManager;
+  private memoryManager: MemoryManager;
   private tokenManager: TokenBudgetManager;
   private compactor: ContextCompactor;
   private statsManager: StatsManager;
@@ -20,6 +22,7 @@ export class TestCommand {
 
   constructor(projectRoot: string = process.cwd()) {
     this.configManager = new ConfigManager(projectRoot);
+    this.memoryManager = new MemoryManager(projectRoot);
     this.tokenManager = new TokenBudgetManager();
     this.compactor = new ContextCompactor();
     this.statsManager = new StatsManager(projectRoot);
@@ -73,17 +76,32 @@ Your goal is to:
 Provide only the test code inside a single Markdown code block.`
     });
 
-    // 2. Add File Context
+    // 2. Project Context — enriched query: style, patterns, dan implementation hints
+    const baseName = require('path').basename(fileName);
+    const enrichedPatchQuery = [
+      `unit test testing patterns coverage mock assertion ${framework}`,
+      `implementation pattern refactoring style`,
+      `file ${baseName}`,
+    ].join(' ');
+    const context = await this.memoryManager.getContextForQuery(enrichedPatchQuery);
+    if (context) {
+      messages.push({
+        role: 'system',
+        content: `Project Context (dependencies, coding style for test generation):\n${context}`
+      });
+    }
+
+    // 3. Add File Context
     messages.push({
       role: 'user',
       content: `Generate unit tests for this file: ${fileName}\n\nContent:\n\`\`\`\n${fileContent}\n\`\`\``
     });
 
-    // 3. Compact Context
-    const compactedMessages = this.compactor.compactMessages(messages, mode);
-
-    // 4. Cost Guard Info
+    // 4. Fetch model metadata dan compact dengan model-aware budget
     const modelMetadata = await this.modelManager.getModel(modelId);
+    const compactedMessages = this.compactor.compactMessages(messages, mode, modelMetadata?.context_length);
+
+    // 5. Cost Guard Info
     if (modelMetadata) {
       const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
       const estimatedCost = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, 1500);

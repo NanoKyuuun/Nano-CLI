@@ -1,0 +1,63 @@
+services:
+  nanocli-db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nanocli_rag
+      POSTGRES_USER: nanocli
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - nanocli_pg_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    networks:
+      - nanocli-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nanocli -d nanocli_rag"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nanocli-ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - nanocli_ollama_data:/root/.ollama
+    networks:
+      - nanocli-net
+    # Uncomment jika home server punya GPU NVIDIA:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  nanocli-api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://nanocli:${DB_PASSWORD}@nanocli-db:5432/nanocli_rag
+      OLLAMA_URL: http://nanocli-ollama:11434
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      API_KEY: ${NANOCLI_API_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      nanocli-db:
+        condition: service_healthy
+      nanocli-ollama:
+        condition: service_started
+    networks:
+      - nanocli-net
+
+networks:
+  nanocli-net:
+    driver: bridge
+
+volumes:
+  nanocli_pg_data:
+  nanocli_ollama_data:

@@ -91,8 +91,14 @@ Use project context if provided to see if similar bugs have occurred before.`;
       content: searchDecision.search ? `${systemBase}\n\n${WEB_SEARCH_GUARD}` : systemBase
     });
 
-    // 2. Add Project Context (Search for similar bugs)
-    const context = await this.memoryManager.getContextForQuery(`bug error ${errorMessage}`);
+    // 2. Add Project Context — enriched query untuk FTS5 dan semantic search
+    // Query yang kaya semantik = lebih banyak konteks relevan ditemukan
+    const enrichedDebugQuery = [
+      'bug error exception fix solution',
+      errorMessage.slice(0, 300),
+      `file ${fileName}`,
+    ].join(' ');
+    const context = await this.memoryManager.getContextForQuery(enrichedDebugQuery);
     if (context) {
       messages.push({
         role: 'system',
@@ -106,11 +112,11 @@ Use project context if provided to see if similar bugs have occurred before.`;
       content: `I encountered an error in file: ${fileName}\n\nError Message:\n\`\`\`\n${errorMessage}\n\`\`\`\n\nFile Content:\n\`\`\`\n${fileContent}\n\`\`\``
     });
 
-    // 4. Compact Context
-    const compactedMessages = this.compactor.compactMessages(messages, mode);
+    // 4. Compact Context — model-aware budget
+    const modelMetadata = await this.modelManager.getModel(modelId);
+    const compactedMessages = this.compactor.compactMessages(messages, mode, modelMetadata?.context_length);
 
     // 5. Cost Guard Info
-    const modelMetadata = await this.modelManager.getModel(modelId);
     if (modelMetadata) {
       const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
       const estimatedCost = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, 800);
@@ -138,7 +144,20 @@ Use project context if provided to see if similar bugs have occurred before.`;
       }
       process.stdout.write('\n\n');
 
-      // 7. Log Usage
+      // 7. Auto-save bug + solusi ke memory_entries (P2.2)
+      // Ringkas error dan solusi agar bisa diambil saat debug serupa di masa depan
+      try {
+        await this.memoryManager.saveMemoryEntry({
+          type: 'bug',
+          content: `[FILE: ${fileName}]\nERROR: ${errorMessage.slice(0, 300)}\nSOLUTION HINT: ${fullResponse.slice(0, 500)}`,
+          sourceFile: fileName,
+          timestamp: Date.now()
+        });
+      } catch {
+        // Jangan crash jika memory save gagal — ini opsional
+      }
+
+      // 8. Log Usage
       if (modelMetadata) {
         const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
         const outputTokens = this.tokenManager.countTextTokens(fullResponse);

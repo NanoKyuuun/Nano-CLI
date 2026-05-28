@@ -1,0 +1,53 @@
+# docker-compose.share.yml
+#
+# File deployment standalone untuk SHARE / telemetry-only mode.
+# Resource: hanya PostgreSQL standar + FastAPI.
+#
+# CARA PAKAI:
+#   docker compose -f docker-compose.share.yml up -d
+#
+
+services:
+  nanocli-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nanocli}
+      POSTGRES_USER: ${POSTGRES_USER:-nanocli}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD wajib di-set di .env}
+    volumes:
+      - nanocli_telemetry_data:/var/lib/postgresql/data
+      - ./schema-share.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    networks:
+      - nanocli-share-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nanocli}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nanocli-api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      ENABLE_RAG: "false"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-nanocli}:${DB_PASSWORD}@nanocli-db:5432/${POSTGRES_DB:-nanocli}
+      API_KEY: ${NANOCLI_API_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      nanocli-db:
+        condition: service_healthy
+    networks:
+      - nanocli-share-net
+
+networks:
+  nanocli-share-net:
+    driver: bridge
+
+volumes:
+  nanocli_telemetry_data:
+    driver: local
