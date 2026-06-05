@@ -4,7 +4,8 @@
 
 **Terminal-first AI coding assistant dengan project memory, agent mode, dan multi-model support**
 
-[![npm version](https://img.shields.io/npm/v/nanocli?style=flat-square&color=CB3837)](https://www.npmjs.com/package/nanocli)
+[![npm version](https://img.shields.io/npm/v/%40nanokyuuun%2Fnanocli?style=flat-square&color=CB3837)](https://www.npmjs.com/package/@nanokyuuun/nanocli)
+[![npm downloads](https://img.shields.io/npm/dm/%40nanokyuuun%2Fnanocli?style=flat-square&color=CB3837)](https://www.npmjs.com/package/@nanokyuuun/nanocli)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen?style=flat-square)](https://nodejs.org)
 [![License](https://img.shields.io/badge/license-ISC-blue?style=flat-square)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square)](https://www.typescriptlang.org)
@@ -120,38 +121,37 @@ nanocli git log          # Log dengan ringkasan perubahan
 ### Via npm (Direkomendasikan)
 
 ```bash
-npm install -g nanocli
+npm install -g @nanokyuuun/nanocli
+```
+
+> Tidak perlu clone, tidak perlu build. Langsung bisa dipakai.
+
+### Setup setelah install
+
+```bash
+# Setup API key dan konfigurasi (wajib, sekali saja)
 nanocli setup
+
+# Cek semua komponen berfungsi
+nanocli doctor
 ```
 
 ### Dari Source
 
-**Prasyarat:**
-- Node.js 20+
-- npm 10+
-- OpenRouter API key — [daftar gratis di openrouter.ai](https://openrouter.ai)
-- Build tools untuk `better-sqlite3`:
-  - **Windows:** [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-  - **macOS:** `xcode-select --install`
-  - **Linux:** `sudo apt install build-essential`
+**Prasyarat build tools** untuk `better-sqlite3`:
+- **Windows:** [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) — centang "Desktop development with C++"
+- **macOS:** `xcode-select --install`
+- **Linux:** `sudo apt install build-essential`
 
 ```bash
-# Clone
 git clone https://github.com/NanoKyuuun/Nano-CLI.git
 cd Nano-CLI/NanoCLI
-
-# Install & build
 npm install
 npm run build
-
-# Install global
 npm install -g .
-
-# Setup
-nanocli setup
 ```
 
-Lihat [INSTALL.md](NanoCLI/INSTALL.md) untuk panduan detail dan troubleshooting.
+Lihat [INSTALL.md](NanoCLI/INSTALL.md) untuk panduan lengkap dan troubleshooting.
 
 ---
 

@@ -6,10 +6,10 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.0-blue?style=flat-square" alt="version">
+  <img src="https://img.shields.io/npm/v/%40nanokyuuun%2Fnanocli?style=flat-square&color=CB3837&label=npm" alt="npm version">
   <img src="https://img.shields.io/badge/runtime-Node.js_20%2B-green?style=flat-square" alt="runtime">
   <img src="https://img.shields.io/badge/license-ISC-gray?style=flat-square" alt="license">
-  <img src="https://img.shields.io/badge/status-Alpha-orange?style=flat-square" alt="status">
+  <img src="https://img.shields.io/badge/status-Beta-orange?style=flat-square" alt="status">
 </p>
 
 ---
@@ -36,48 +36,33 @@ NanoCLI adalah AI coding assistant yang berjalan sepenuhnya di terminal. Ia meng
 
 ## Instalasi
 
-### 1. Clone repository
+### Via npm (Direkomendasikan)
 
 ```bash
-git clone <repo-url>
-cd NanoCLI
+npm install -g @nanokyuuun/nanocli
 ```
 
-### 2. Install dependencies
+### Setup
 
 ```bash
-npm install
-```
-
-### 3. Build
-
-```bash
-npm run build
-```
-
-### 4. Install sebagai global command
-
-```bash
-npm install -g .
-```
-
-Setelah ini, perintah `nanocli` tersedia di seluruh sistem.
-
-### 5. Setup API key
-
-```bash
+# Setup API key dan konfigurasi
 nanocli setup
-```
 
-Ikuti prompt untuk memasukkan OpenRouter API key dan memilih model default.
-
-### 6. Inisialisasi project memory (opsional, tapi direkomendasikan)
-
-```bash
+# Inisialisasi project memory (opsional, tapi direkomendasikan)
 nanocli init
 ```
 
-Membuat `.nanocli/` di direktori project dan mulai mengindeks file untuk RAG.
+### Dari Source
+
+```bash
+git clone https://github.com/NanoKyuuun/Nano-CLI.git
+cd Nano-CLI/NanoCLI
+npm install
+npm run build
+npm install -g .
+```
+
+Lihat [INSTALL.md](INSTALL.md) untuk panduan detail, troubleshooting, dan prasyarat build tools.
 
 ---
 

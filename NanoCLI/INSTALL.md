@@ -6,7 +6,6 @@
 |----------|--------------|-----|
 | Node.js  | 20.x         | `node --version` |
 | npm      | 10.x         | `npm --version` |
-| Git      | 2.x          | `git --version` |
 
 > [!IMPORTANT]
 > NanoCLI adalah **TypeScript/Node.js project**, bukan Python.
@@ -14,13 +13,42 @@
 
 ---
 
-## Langkah Instalasi
+## Cara 1 — Via npm (Direkomendasikan)
+
+Cara tercepat. Tidak perlu clone, tidak perlu build.
+
+```bash
+npm install -g @nanokyuuun/nanocli
+```
+
+Verifikasi:
+```bash
+nanocli --version
+```
+
+Lanjut ke [Setup API Key](#setup-api-key).
+
+---
+
+## Cara 2 — Dari Source
+
+Gunakan cara ini jika kamu ingin berkontribusi atau memodifikasi kode.
+
+**Tambahan prasyarat untuk build dari source:**
+
+Build tools untuk `better-sqlite3` (native addon):
+
+| OS | Cara Install |
+|----|-------------|
+| **Windows** | [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) — centang "Desktop development with C++" |
+| **macOS** | `xcode-select --install` |
+| **Linux** | `sudo apt install build-essential` (Ubuntu/Debian) |
 
 ### Step 1 — Clone Repository
 
 ```bash
-git clone <repo-url> NanoCLI
-cd NanoCLI
+git clone https://github.com/NanoKyuuun/Nano-CLI.git
+cd Nano-CLI/NanoCLI
 ```
 
 ### Step 2 — Install Dependencies
@@ -44,7 +72,7 @@ npm run build
 
 Output build ada di folder `dist/`. Pastikan tidak ada error TypeScript sebelum melanjutkan.
 
-### Step 4 — Install Global (Opsional tapi Direkomendasikan)
+### Step 4 — Install Global
 
 ```bash
 npm install -g .
@@ -52,7 +80,7 @@ npm install -g .
 
 Setelah ini, `nanocli` bisa dijalankan dari direktori manapun.
 
-Untuk verify:
+Verifikasi:
 ```bash
 nanocli --version
 ```
@@ -77,6 +105,10 @@ Wizard akan memandu kamu untuk:
 2. Memilih model default untuk setiap mode (fast/normal/high/extra-high)
 3. Memilih mode koneksi (local/share/self-host)
 
+> [!NOTE]
+> API key dari OpenRouter bisa diperoleh gratis di [openrouter.ai/keys](https://openrouter.ai/keys).
+> Beberapa model tersedia dengan kredit gratis.
+
 ### Cara 2 — Manual
 
 Buat file `~/.nanocli/config.json`:
@@ -92,10 +124,6 @@ Buat file `~/.nanocli/config.json`:
   }
 }
 ```
-
-> [!NOTE]
-> API key dari OpenRouter bisa diperoleh gratis di [openrouter.ai/keys](https://openrouter.ai/keys).
-> Beberapa model tersedia dengan kredit gratis.
 
 ---
 
@@ -122,28 +150,24 @@ Ini akan:
 
 ## Verifikasi Instalasi
 
-Jalankan test untuk memastikan semua komponen berfungsi:
-
 ```bash
-# Cek build
-npm run build
+# Cek versi
+nanocli --version
 
-# Cek semua test pass
-npm test
+# Cek semua komponen (health check)
+nanocli doctor
 
-# Cek binary
+# Cek help
 nanocli --help
 ```
 
-Expected output `npm test`:
+Expected output `nanocli doctor`:
 ```
-✓ tests/commandExecutor.test.ts (11 tests)
-✓ tests/patchApplicator.test.ts (7 tests)
-✓ tests/toolRouter.test.ts (21 tests)
-✓ tests/tokenBudgetManager.test.ts (10 tests)
-
-Test Files  4 passed (4)
-     Tests  49 passed (49)
+✓ OpenRouter API key     — ditemukan
+✓ Model tersedia         — terkoneksi
+✓ SQLite memory          — aktif
+✓ Project context        — terindeks
+✓ Git integration        — tersedia
 ```
 
 ---
@@ -158,6 +182,7 @@ npm rebuild better-sqlite3
 ```
 
 `better-sqlite3` adalah native module yang perlu di-compile untuk Node.js versi kamu.
+Pastikan build tools sudah terinstall (lihat [Cara 2](#cara-2--dari-source) di atas).
 
 ### Error: `API Key tidak ditemukan`
 
@@ -169,14 +194,19 @@ Atau periksa apakah file `~/.nanocli/config.json` ada dan berisi `apiKey`.
 
 ### Error: `nanocli: command not found`
 
-Jalankan dari direktori project:
+Jika install via npm:
 ```bash
-node dist/main.js
+npm install -g @nanokyuuun/nanocli
 ```
 
-Atau install global ulang:
+Jika install dari source:
 ```bash
 npm install -g .
+```
+
+Atau jalankan langsung dari project directory:
+```bash
+node dist/main.js
 ```
 
 ### Build error: TypeScript errors
@@ -195,6 +225,12 @@ npx tsc --version  # should be 5.x or higher
 
 ## Update
 
+### Jika install via npm:
+```bash
+npm update -g @nanokyuuun/nanocli
+```
+
+### Jika install dari source:
 ```bash
 git pull
 npm install
@@ -207,7 +243,7 @@ npm run build
 
 ```bash
 # Hapus global binary
-npm uninstall -g nanocli
+npm uninstall -g @nanokyuuun/nanocli
 
 # Hapus config (opsional — ini menghapus API key dan semua settings)
 rm -rf ~/.nanocli

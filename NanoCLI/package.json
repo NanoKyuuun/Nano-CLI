@@ -1,5 +1,5 @@
 {
-  "name": "nanocli",
+  "name": "@nanokyuuun/nanocli",
   "version": "1.0.0",
   "description": "Terminal-first AI coding assistant with project memory, agent mode, and multi-model support via OpenRouter",
   "main": "dist/main.js",
@@ -13,6 +13,9 @@
     "SECURITY.md",
     ".env.example"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run check && npm run build",
