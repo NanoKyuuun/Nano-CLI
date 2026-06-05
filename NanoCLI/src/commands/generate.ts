@@ -163,10 +163,13 @@ export class GenerateCommand {
 
     // 8. Log usage
     if (modelMetadata) {
-      const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
+      const inputTokens  = this.tokenManager.countMessageTokens(compactedMessages);
       const outputTokens = this.tokenManager.countTextTokens(fullContent);
-      const costUsd = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, outputTokens);
-      await this.statsManager.logUsage({ timestamp: Date.now(), modelId, mode, inputTokens, outputTokens, costUsd });
+      const costUsd      = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, outputTokens);
+      await this.statsManager.logUsage({
+        timestamp: Date.now(), modelId, mode, inputTokens, outputTokens,
+        costUsd: costUsd ?? 0,
+      });
     }
   }
 

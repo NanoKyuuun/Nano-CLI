@@ -89,9 +89,9 @@ export class AskCommand {
 
     // 6. Cost Guard
     if (modelMetadata) {
-      const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
+      const inputTokens   = this.tokenManager.countMessageTokens(compactedMessages);
       const estimatedCost = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, 500);
-      if (estimatedCost > 0.05) {
+      if (estimatedCost !== null && estimatedCost > 0.05) {
         Renderer.printStatus(`Estimasi biaya request ini: $${estimatedCost.toFixed(4)} USD.`, 'warn');
       }
     }
@@ -115,10 +115,13 @@ export class AskCommand {
 
       // 8. Log Usage
       if (modelMetadata) {
-        const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
+        const inputTokens  = this.tokenManager.countMessageTokens(compactedMessages);
         const outputTokens = this.tokenManager.countTextTokens(fullResponse);
-        const costUsd = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, outputTokens);
-        await this.statsManager.logUsage({ timestamp: Date.now(), modelId, mode, inputTokens, outputTokens, costUsd });
+        const costUsd      = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, outputTokens);
+        await this.statsManager.logUsage({
+          timestamp: Date.now(), modelId, mode, inputTokens, outputTokens,
+          costUsd: costUsd ?? 0,
+        });
       }
     } catch (error: any) {
       Renderer.printStatus(error.message, 'error');

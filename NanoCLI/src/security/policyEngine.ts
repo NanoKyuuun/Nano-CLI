@@ -41,6 +41,9 @@ export class PolicyEngine {
    * @param options.reason - Alasan AI mengusulkan command (opsional)
    * @param options.skipApprovalForLowRisk - Jika true, low-risk command
    *   langsung diizinkan tanpa prompt. TETAP menjalankan risk analyzer.
+   * @param options.forceApprove - P2-01: Jika true, bypass approval gate
+   *   sepenuhnya (digunakan oleh batch approval setelah user approve di level batch).
+   *   Risk analyzer TETAP berjalan — blocked command tetap diblokir.
    */
   async validateAndApprove(options: {
     command: string;
@@ -48,6 +51,7 @@ export class PolicyEngine {
     shellName?: string;
     reason?: string;
     skipApprovalForLowRisk?: boolean;
+    forceApprove?: boolean;
   }): Promise<PolicyResult> {
     // 1. Analisis risiko — SELALU dijalankan, tidak bisa di-skip
     const risk = this.analyzer.analyze(options.command);
@@ -55,7 +59,13 @@ export class PolicyEngine {
     // 2. Tentukan apakah perlu approval
     let approval: ApprovalResult;
 
-    if (options.skipApprovalForLowRisk && risk.level === 'low') {
+    if (risk.blocked) {
+      // Command yang diblokir TIDAK PERNAH lolos, bahkan dengan forceApprove
+      approval = { approved: false, reason: 'blocked_by_policy' };
+    } else if (options.forceApprove) {
+      // P2-01: Batch mode — user sudah approve di level batch
+      approval = { approved: true, reason: 'batch_approved' };
+    } else if (options.skipApprovalForLowRisk && risk.level === 'low') {
       // --yes flag hanya berlaku untuk low-risk
       approval = { approved: true, reason: 'auto_approved_low_risk' };
     } else {

@@ -27,6 +27,44 @@ import { AuditLogger } from '../security/auditLogger';
 /** Batas maksimal buffer per baris sebelum flush parsial (8 KB). */
 const MAX_LINE_BUFFER = 8_192;
 
+/**
+ * Allowlist environment variables yang aman diwariskan ke subprocess.
+ *
+ * TIDAK termasuk:
+ * - OPENROUTER_API_KEY dan secret lain
+ * - DATABASE_URL, JWT_SECRET, dll.
+ * - Semua key yang tidak ada di list ini
+ *
+ * Jika command butuh env tertentu (misal: NPM_TOKEN untuk publish),
+ * user harus set env tersebut di shell mereka sendiri atau gunakan
+ * opsi --allow-env di masa depan.
+ */
+const SAFE_ENV_KEYS = new Set([
+  // Shell essentials
+  'PATH', 'HOME', 'SHELL', 'TERM', 'USER', 'USERNAME', 'LOGNAME',
+  // Windows-specific
+  'SystemRoot', 'ComSpec', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
+  'APPDATA', 'LOCALAPPDATA', 'PROGRAMFILES', 'PROGRAMDATA', 'WINDIR',
+  // Temp directories
+  'TMPDIR', 'TEMP', 'TMP',
+  // Locale
+  'LANG', 'LC_ALL', 'LC_CTYPE',
+  // Node/npm (safe — tidak mengandung secret)
+  'NODE_ENV', 'npm_config_cache', 'npm_config_prefix',
+]);
+
+/**
+ * Buat environment object yang aman untuk subprocess.
+ * Hanya mengandung key dari SAFE_ENV_KEYS.
+ */
+function buildSafeEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const safe: NodeJS.ProcessEnv = {};
+  for (const key of SAFE_ENV_KEYS) {
+    if (source[key] !== undefined) safe[key] = source[key];
+  }
+  return safe;
+}
+
 export class CommandExecutor {
   private redactor: SecretRedactor;
   private outputLimiter: OutputLimiter;
@@ -70,7 +108,7 @@ export class CommandExecutor {
 
       const child = spawn(options.shell.command, [...options.shell.args, options.command], {
         cwd:   options.cwd,
-        env:   process.env,
+        env:   buildSafeEnv(process.env),   // Hanya env aman — jangan wariskan secret
         stdio: [stdinMode, 'pipe', 'pipe'],
       });
 

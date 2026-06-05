@@ -165,6 +165,26 @@ export class AgentLoop {
     let consecutiveFailures = 0;
     const MAX_CONSECUTIVE_FAILURES = 3;
 
+    /**
+     * Fingerprint setiap action berdasarkan (type, path/command).
+     * Tidak menggunakan konten — perubahan minor konten tidak mencegah deteksi loop.
+     */
+    function fingerprintAction(action: AgentAction): string {
+      switch (action.type) {
+        case 'file.write':
+        case 'file.patch':
+        case 'file.read':
+          return `${action.type}:${action.path}`;
+        case 'terminal.run':
+          return `terminal.run:${action.command}`;
+        default:
+          return action.type;
+      }
+    }
+
+    // Map fingerprint → jumlah eksekusi
+    const executedActionFingerprints = new Map<string, number>();
+
     for (let step = 1; step <= options.maxSteps; step++) {
       console.log(chalk.gray(`  ● Step ${step}/${options.maxSteps}`));
 
@@ -179,8 +199,8 @@ export class AgentLoop {
       // Cost guard per step — info jika token mulai banyak
       if (modelMetadata) {
         const stepTokens = this.tokenManager.countMessageTokens(compacted);
-        const stepCost = this.tokenManager.estimateCost(stepTokens, modelMetadata.pricing, 800);
-        if (stepCost > 0.02) {
+        const stepCost   = this.tokenManager.estimateCost(stepTokens, modelMetadata.pricing, 800);
+        if (stepCost !== null && stepCost > 0.02) {
           Renderer.printStatus(
             `Estimasi biaya step ${step}: $${stepCost.toFixed(4)} USD (${stepTokens} token)`,
             'warn',
@@ -253,6 +273,25 @@ export class AgentLoop {
         this.renderFinalSummary(finalAction, state);
         break;
       }
+
+      // ── Duplicate Action Guard ────────────────────────────────────────────
+      // Jika action non-final yang sama diulang ≥ 2x, hentikan agent.
+      // Ini mencegah infinite loop ketika model tidak tahu task sudah selesai.
+      const fp    = fingerprintAction(action);
+      const count = (executedActionFingerprints.get(fp) ?? 0) + 1;
+      executedActionFingerprints.set(fp, count);
+
+      if (count >= 2) {
+        Renderer.printStatus(
+          `Agent berhenti: action yang sama diulang ${count}x (${fp}). ` +
+          `Kemungkinan task sudah selesai atau agent tidak bisa melanjutkan. Coba perinci task-nya.`,
+          'warn',
+        );
+        state.status = 'error';
+        this.renderPartialSummary(state);
+        return state;
+      }
+      // ─────────────────────────────────────────────────────────────────────
 
       // Tampilkan action yang akan dijalankan
       this.printActionPreview(action);

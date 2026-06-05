@@ -41,11 +41,34 @@ export class TokenBudgetManager {
 
   /**
    * Mengestimasi biaya request dalam USD.
+   *
+   * Harga dari OpenRouter adalah per-million-token (bukan per-token).
+   * Return null jika pricing tidak diketahui atau tidak valid:
+   *   - Sentinel "-1" = routed/variable pricing (biaya tidak fix)
+   *   - NaN, Infinity, nilai negatif = data pricing cacat
+   *
+   * Caller wajib handle null — jangan tampilkan angka jika biaya tidak diketahui.
    */
-  estimateCost(inputTokens: number, pricing: { prompt: string; completion: string }, expectedOutputTokens: number = 1000): number {
-    const promptPrice = parseFloat(pricing.prompt) * inputTokens;
-    const completionPrice = parseFloat(pricing.completion) * expectedOutputTokens;
-    return promptPrice + completionPrice;
+  estimateCost(
+    inputTokens: number,
+    pricing: { prompt: string; completion: string },
+    expectedOutputTokens: number = 1000,
+  ): number | null {
+    // Sentinel -1 = model ini memakai variable/routed pricing
+    if (pricing.prompt === '-1' || pricing.completion === '-1') return null;
+
+    const promptPerMillion     = Number.parseFloat(pricing.prompt);
+    const completionPerMillion = Number.parseFloat(pricing.completion);
+
+    // Guard: NaN, Infinity, nilai negatif
+    if (!Number.isFinite(promptPerMillion) || !Number.isFinite(completionPerMillion)) return null;
+    if (promptPerMillion < 0 || completionPerMillion < 0) return null;
+
+    // Harga adalah per-million-token — bagi dulu sebelum kalikan
+    const promptCost     = (inputTokens / 1_000_000) * promptPerMillion;
+    const completionCost = (expectedOutputTokens / 1_000_000) * completionPerMillion;
+
+    return promptCost + completionCost;
   }
 
   /**

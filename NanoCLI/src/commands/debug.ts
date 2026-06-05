@@ -118,9 +118,9 @@ Use project context if provided to see if similar bugs have occurred before.`;
 
     // 5. Cost Guard Info
     if (modelMetadata) {
-      const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
+      const inputTokens   = this.tokenManager.countMessageTokens(compactedMessages);
       const estimatedCost = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, 800);
-      if (estimatedCost > 0.05) {
+      if (estimatedCost !== null && estimatedCost > 0.05) {
         Renderer.printStatus(`Estimasi biaya debug: $${estimatedCost.toFixed(4)} USD.`, 'warn');
       }
     }
@@ -159,17 +159,13 @@ Use project context if provided to see if similar bugs have occurred before.`;
 
       // 8. Log Usage
       if (modelMetadata) {
-        const inputTokens = this.tokenManager.countMessageTokens(compactedMessages);
+        const inputTokens  = this.tokenManager.countMessageTokens(compactedMessages);
         const outputTokens = this.tokenManager.countTextTokens(fullResponse);
-        const costUsd = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, outputTokens);
+        const costUsd      = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, outputTokens);
 
         await this.statsManager.logUsage({
-          timestamp: Date.now(),
-          modelId,
-          mode,
-          inputTokens,
-          outputTokens,
-          costUsd
+          timestamp: Date.now(), modelId, mode, inputTokens, outputTokens,
+          costUsd: costUsd ?? 0,
         });
       }
     } catch (error: any) {

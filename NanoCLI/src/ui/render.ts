@@ -245,6 +245,14 @@ export class Renderer {
     entry('/terminal detect','Deteksi shell yang tersedia');
     console.log(sep);
 
+    section('MEMORY');
+    entry('/memory review',         'Tampilkan 20 memory entries terakhir');
+    entry('/memory save <teks>',    'Simpan memory secara manual');
+    entry('/memory forget <id>',    'Hapus memory berdasarkan ID');
+    entry('/memory auto on|off',    'Toggle auto-extraction saat /exit');
+    entry('/memory update',         'Index ulang file project');
+    console.log(sep);
+
     console.log(`  ${bot}`);
     console.log('');
   }

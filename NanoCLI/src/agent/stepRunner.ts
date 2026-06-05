@@ -6,7 +6,7 @@
  */
 
 import path from 'path';
-import { AgentAction, AgentStepResult, AgentLoopOptions } from './agentTypes';
+import { AgentAction, AgentStepResult, AgentLoopOptions, ActionFeedback } from './agentTypes';
 import { FileOperationManager } from '../file/fileOperationManager';
 import { PatchApplicator } from '../file/patchApplicator';
 import { PolicyEngine } from '../security/policyEngine';
@@ -14,20 +14,42 @@ import { CommandExecutor } from '../terminal/commandExecutor';
 import { ShellDetector } from '../terminal/shellDetector';
 import { safeReadTextFile } from '../files/safeFileReader';
 import { Renderer } from '../ui/render';
+import { WriteValidator } from '../file/writeValidator';
+
+/**
+ * Normalisasi input patch dari AI.
+ *
+ * AI terkadang menghasilkan patch yang sudah dibungkus dalam fenced code block:
+ *   ```diff
+ *   --- a/file.ts
+ *   +++ b/file.ts
+ *   @@ ... @@
+ *   ```
+ *
+ * StepRunner kemudian membungkusnya lagi dengan fence, menyebabkan double-wrap.
+ * Fungsi ini menghapus fence luar jika ada, sehingga hasil selalu berupa raw diff.
+ */
+function normalizePatchInput(input: string): string {
+  const trimmed = input.trim();
+  const fenced  = trimmed.match(/^```(?:diff|patch)?\s*\n([\s\S]*?)\n```$/);
+  return fenced ? fenced[1]!.trim() : trimmed;
+}
 
 export class StepRunner {
   private fileManager: FileOperationManager;
   private patchApplicator: PatchApplicator;
   private policyEngine: PolicyEngine;
   private commandExecutor: CommandExecutor;
+  private writeValidator: WriteValidator;
   private projectRoot: string;
 
   constructor(projectRoot: string = process.cwd(), options?: AgentLoopOptions) {
-    this.projectRoot = path.resolve(projectRoot);
-    this.fileManager = new FileOperationManager(projectRoot);
+    this.projectRoot   = path.resolve(projectRoot);
+    this.fileManager   = new FileOperationManager(projectRoot);
     this.patchApplicator = new PatchApplicator();
-    this.policyEngine = new PolicyEngine(projectRoot);
+    this.policyEngine  = new PolicyEngine(projectRoot);
     this.commandExecutor = new CommandExecutor(projectRoot);
+    this.writeValidator  = new WriteValidator();
   }
 
   async run(action: AgentAction, options?: AgentLoopOptions): Promise<AgentStepResult> {
@@ -42,10 +64,10 @@ export class StepRunner {
         return this.runTerminal(action.command, action.cwd, action.reason, options);
 
       case 'file.write':
-        return this.runFileWrite(action.path, action.content, action.mode, action.reason);
+        return this.runFileWrite(action.path, action.content, action.mode, action.reason, options);
 
       case 'file.patch':
-        return this.runFilePatch(action.path, action.patch, action.reason);
+        return this.runFilePatch(action.path, action.patch, action.reason, options);
 
       case 'file.read':
         return this.runFileRead(action.path);
@@ -84,17 +106,23 @@ export class StepRunner {
     if (permission === 'readonly') {
       const blocked = new Set<string>(['terminal.run', 'file.write', 'file.patch']);
       if (blocked.has(action.type)) {
+        const fb: ActionFeedback = {
+          actionType: action.type,
+          status: 'skipped',
+          errorCode: 'PERMISSION_DENIED',
+          message: `Permission 'readonly' tidak mengizinkan ${action.type}.`,
+          suggestedNextStep: `Hanya file.read yang diizinkan di mode readonly. Gunakan permission 'workspace' jika perlu write.`,
+        };
         return {
           success: false,
-          output: `Ditolak: permission 'readonly' tidak mengizinkan ${action.type}. Hanya file.read yang diizinkan di mode ini.`,
+          output: fb.message + ' ' + fb.suggestedNextStep!,
           skipped: true,
           skipReason: `readonly permission blocks ${action.type}`,
+          feedback: fb,
         };
       }
     }
 
-    // workspace dan full: tidak ada pre-rejection di sini.
-    // Perbedaan hanya pada cwd boundary yang di-enforce di runTerminal.
     return null;
   }
 
@@ -122,11 +150,19 @@ export class StepRunner {
         : this.projectRoot + path.sep;
 
       if (effectiveCwd !== this.projectRoot && !effectiveCwd.startsWith(safeRoot)) {
+        const fb: ActionFeedback = {
+          actionType: 'terminal.run',
+          status: 'skipped',
+          errorCode: 'WORKSPACE_BOUNDARY',
+          message: `cwd "${effectiveCwd}" berada di luar workspace "${this.projectRoot}".`,
+          suggestedNextStep: `Gunakan cwd yang berada di dalam project root, atau minta permission 'full' untuk akses di luar workspace.`,
+        };
         return {
           success: false,
-          output: `Ditolak: cwd "${effectiveCwd}" berada di luar workspace "${this.projectRoot}". Gunakan permission 'full' jika perlu menjalankan command di luar project root.`,
+          output: fb.message + ' ' + fb.suggestedNextStep!,
           skipped: true,
           skipReason: 'workspace boundary violation',
+          feedback: fb,
         };
       }
     }
@@ -143,16 +179,26 @@ export class StepRunner {
       shellName: shell.name,
       reason,
       skipApprovalForLowRisk: false,
+      // P2-01: Jika batchApprove aktif, bypass approval gate individual
+      forceApprove: options?.batchApprove === true,
     });
 
     if (!policyResult.approval.approved) {
-      const result: AgentStepResult = {
-        success: false,
-        output: `Command ditolak: ${policyResult.approval.reason ?? 'user menolak'}`,
-        skipped: true,
+      const reason = policyResult.approval.reason ?? 'user menolak';
+      const fb: ActionFeedback = {
+        actionType: 'terminal.run',
+        status: 'skipped',
+        errorCode: 'USER_REJECTED',
+        message: `Command ditolak: ${reason}`,
+        suggestedNextStep: 'Coba command yang lebih spesifik atau jelaskan tujuannya ke user.',
       };
-      if (policyResult.approval.reason) result.skipReason = policyResult.approval.reason;
-      return result;
+      return {
+        success: false,
+        output: fb.message,
+        skipped: true,
+        skipReason: reason,
+        feedback: fb,
+      };
     }
 
     const finalCommand = policyResult.approval.editedCommand ?? command;
@@ -169,10 +215,37 @@ export class StepRunner {
     const output = result.output || result.stderr || '(no output)';
 
     if (result.exitCode !== 0 && !result.timedOut) {
+      // Deteksi command not found dari exit code 127 (bash) atau pesan error
+      const isNotFound = result.exitCode === 127 ||
+        (result.stderr ?? '').toLowerCase().includes('command not found') ||
+        (result.stderr ?? '').toLowerCase().includes('is not recognized');
+
+      const fb: ActionFeedback = {
+        actionType: 'terminal.run',
+        status: 'failed',
+        errorCode: isNotFound ? 'COMMAND_NOT_FOUND' : 'COMMAND_FAILED',
+        message: `Exit ${result.exitCode ?? 'null'}: ${output.slice(0, 500)}`,
+        stderr: result.stderr?.slice(0, 500),
+        suggestedNextStep: isNotFound
+          ? 'Pastikan binary tersedia di PATH. Coba jalankan perintah yang valid.'
+          : 'Periksa stderr untuk detail error. Coba perbaiki command atau jalankan dependency yang dibutuhkan.',
+      };
       return {
         success: false,
         output: `Exit ${result.exitCode ?? 'null'}: ${output.slice(0, 2000)}`,
+        feedback: fb,
       };
+    }
+
+    if (result.timedOut) {
+      const fb: ActionFeedback = {
+        actionType: 'terminal.run',
+        status: 'failed',
+        errorCode: 'TIMEOUT',
+        message: 'Command melebihi timeout (120s).',
+        suggestedNextStep: 'Pecah command menjadi lebih kecil atau tingkatkan timeout.',
+      };
+      return { success: false, output: 'Command timeout (120s)', feedback: fb };
     }
 
     return { success: true, output: output.slice(0, 2000) };
@@ -185,6 +258,7 @@ export class StepRunner {
     content: string,
     mode: 'create' | 'overwrite' | 'append',
     reason: string,
+    options?: AgentLoopOptions,
   ): Promise<AgentStepResult> {
     Renderer.printStatus(`File write: ${filePath} (${mode})`, 'info');
 
@@ -192,15 +266,43 @@ export class StepRunner {
       requireApproval: true,
       reason,
       showDiff: mode !== 'create',
+      // P2-01: Jika batchApprove aktif, lewati approval gate per-file
+      autoApprove: options?.batchApprove === true,
     });
 
     this.fileManager.printResult(result);
 
+    if (!result.success) {
+      return {
+        success: false,
+        output: result.error ?? 'Gagal',
+        ...({
+          feedback: {
+            actionType: 'file.write',
+            status: 'failed' as const,
+            errorCode: 'FILE_WRITE_FAILED' as const,
+            message: result.error ?? 'Gagal menulis file.',
+            suggestedNextStep: 'Periksa apakah path valid dan ada izin tulis ke direktori tersebut.',
+          },
+        }),
+      };
+    }
+
+    // P2-02: Post-write validation
+    const absolutePath = path.resolve(this.projectRoot, filePath);
+    const validation = this.writeValidator.validate(absolutePath, content);
+    if (validation && !validation.valid) {
+      const warning = `\n⚠ [POST-WRITE] ${validation.message}${validation.suggestion ? ' ' + validation.suggestion : ''}`;
+      Renderer.printStatus(`Post-write validation: ${validation.message}`, 'warn');
+      return {
+        success: true, // file tetap tersimpan — ini hanya warning
+        output: `File ${mode === 'create' ? 'dibuat' : 'diupdate'}: ${result.path}${warning}`,
+      };
+    }
+
     return {
-      success: result.success,
-      output: result.success
-        ? `File ${mode === 'create' ? 'dibuat' : 'diupdate'}: ${result.path}${result.diff ? ` (${result.diff})` : ''}`
-        : result.error ?? 'Gagal',
+      success: true,
+      output: `File ${mode === 'create' ? 'dibuat' : 'diupdate'}: ${result.path}${result.diff ? ` (${result.diff})` : ''}`,
     };
   }
 
@@ -210,6 +312,7 @@ export class StepRunner {
     filePath: string,
     patchStr: string,
     reason: string,
+    options?: AgentLoopOptions,
   ): Promise<AgentStepResult> {
     Renderer.printStatus(`File patch: ${filePath}`, 'info');
 
@@ -221,26 +324,70 @@ export class StepRunner {
       });
       originalContent = readResult.content;
     } catch (err: any) {
-      return { success: false, output: `Tidak bisa membaca file: ${err.message}` };
+      return {
+        success: false,
+        output: `Tidak bisa membaca file: ${err.message}`,
+        feedback: {
+          actionType: 'file.patch',
+          status: 'failed',
+          errorCode: 'FILE_NOT_FOUND',
+          message: `File tidak ditemukan atau tidak bisa dibaca: ${filePath}`,
+          suggestedNextStep: 'Gunakan file.read untuk cek keberadaan file, atau file.write untuk membuat file baru.',
+        },
+      };
     }
 
+    // Normalisasi patch: jika AI sudah menghasilkan fenced block (```diff...```),
+    // strip fence-nya dulu agar tidak terjadi double-wrap saat kita tambahkan fence baru.
+    const normalizedPatch = normalizePatchInput(patchStr);
+
     const extracted = this.patchApplicator.extract(
-      `\`\`\`diff\n${patchStr}\n\`\`\``,
+      `\`\`\`diff\n${normalizedPatch}\n\`\`\``,
       this.patchApplicator.getExtension(filePath),
     );
     if (!extracted) {
-      return { success: false, output: 'Tidak bisa mengekstrak patch dari respons AI' };
+      return {
+        success: false,
+        output: [
+          'Tidak bisa mengekstrak patch dari respons AI.',
+          'Format yang diharapkan:',
+          '--- a/file.ts',
+          '+++ b/file.ts',
+          '@@ ... @@',
+          '-baris lama',
+          '+baris baru',
+        ].join('\n'),
+        feedback: {
+          actionType: 'file.patch',
+          status: 'failed',
+          errorCode: 'PATCH_PARSE_FAILED',
+          message: 'Patch tidak valid sebagai unified diff.',
+          suggestedNextStep: 'Hasilkan patch dalam format unified diff standar (--- a/file \n+++ b/file \n@@ ... @@).',
+        },
+      };
     }
 
     const newContent = this.patchApplicator.apply(originalContent, extracted);
     if (!newContent) {
-      return { success: false, output: 'Patch gagal diapply (format tidak cocok)' };
+      return {
+        success: false,
+        output: 'Patch gagal diapply — patch mungkin tidak cocok dengan isi file saat ini',
+        feedback: {
+          actionType: 'file.patch',
+          status: 'failed',
+          errorCode: 'PATCH_APPLY_FAILED',
+          message: 'Patch tidak cocok dengan isi file saat ini.',
+          suggestedNextStep: 'Baca ulang isi file dengan file.read, lalu buat patch baru yang sesuai dengan versi terkini.',
+        },
+      };
     }
 
     const writeResult = await this.fileManager.write(filePath, newContent, 'overwrite', {
       requireApproval: true,
       reason,
       showDiff: true,
+      // P2-01: Batch approval bypass
+      autoApprove: options?.batchApprove === true,
     });
 
     this.fileManager.printResult(writeResult);
@@ -266,7 +413,17 @@ export class StepRunner {
         output: `[File: ${result.relativePath}]\n${result.content.slice(0, 8000)}`,
       };
     } catch (err: any) {
-      return { success: false, output: `Tidak bisa membaca file: ${err.message}` };
+      return {
+        success: false,
+        output: `Tidak bisa membaca file: ${err.message}`,
+        feedback: {
+          actionType: 'file.read',
+          status: 'failed',
+          errorCode: 'FILE_NOT_FOUND',
+          message: `File tidak ditemukan: ${filePath}`,
+          suggestedNextStep: 'Pastikan path benar dan file ada. Cek dengan terminal.run "ls" atau "dir" untuk melihat struktur direktori.',
+        },
+      };
     }
   }
 }

@@ -17,7 +17,7 @@ import type { TelemetryEvent } from './types';
  * Ini URL yang akan diisi saat open-source dirilis.
  */
 export const NANOCLI_TELEMETRY_URL =
-  process.env['NANOCLI_TELEMETRY_URL'] ?? 'https://telemetry.nanocli.dev';
+  process.env['NANOCLI_TELEMETRY_URL'] ?? 'https://server-nanocli.nexthive.id';
 
 /** Versi CLI — diisi dari package.json saat build */
 const CLI_VERSION = process.env['npm_package_version'] ?? '1.0.0';

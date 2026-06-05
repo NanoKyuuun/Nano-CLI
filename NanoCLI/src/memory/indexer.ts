@@ -87,6 +87,7 @@ export class Indexer {
         content,
         type,
         source_file,
+        content='memory_entries',
         content_rowid='id'
       );
 
@@ -179,6 +180,17 @@ export class Indexer {
     return (stmt.get(relativePath) as FileIndex | undefined) ?? null;
   }
 
+  /**
+   * Hapus entry file dari index berdasarkan path relatif.
+   * Dipanggil saat file dihapus dari disk — FileWatcher (P2-04).
+   */
+  removeFileIndex(relativePath: string): void {
+    // Hapus dari table files
+    this.db.prepare('DELETE FROM files WHERE path = ?').run(relativePath);
+    // Hapus dari FTS5 virtual table
+    this.db.prepare('DELETE FROM files_fts WHERE path = ?').run(relativePath);
+  }
+
   addMemoryEntry(entry: MemoryEntry) {
     const insert = this.db.prepare(`
       INSERT INTO memory_entries
@@ -204,7 +216,10 @@ export class Indexer {
    * Kembalikan true jika berhasil dihapus, false jika tidak ditemukan.
    */
   deleteMemoryEntry(id: number): boolean {
-    const result = this.db.prepare('DELETE FROM memory_entries WHERE id = ?').run(id);
+    // Gunakan named parameter (@id) bukan positional (?)
+    // untuk menghindari SQL logic error di better-sqlite3 saat
+    // id berasal dari hasil query yang sama.
+    const result = this.db.prepare('DELETE FROM memory_entries WHERE id = @id').run({ id: Number(id) });
     return result.changes > 0;
   }
 
@@ -248,7 +263,16 @@ export class Indexer {
       INSERT INTO feedback (session_id, response_preview, rating, prompt_preview, model_id, timestamp)
       VALUES (@sessionId, @responsePreview, @rating, @promptPreview, @modelId, @timestamp)
     `);
-    stmt.run(feedback);
+    // better-sqlite3 tidak menerima `undefined` — harus di-convert ke null secara eksplisit.
+    // Ini penting untuk field opsional (promptPreview, modelId) agar tidak throw RangeError.
+    stmt.run({
+      sessionId:       feedback.sessionId,
+      responsePreview: feedback.responsePreview,
+      rating:          feedback.rating,
+      promptPreview:   feedback.promptPreview ?? null,
+      modelId:         feedback.modelId ?? null,
+      timestamp:       feedback.timestamp,
+    });
   }
 
   /**
@@ -289,15 +313,22 @@ export class Indexer {
 
     const memorySearch = this.db.prepare(`
       SELECT me.id, me.type, me.content, me.source_file,
-             COALESCE(me.scope, 'project') AS scope,
-             COALESCE(me.confidence, 1.0)  AS confidence,
-             bm25(memory_fts) AS bm25_score
+             COALESCE(me.scope, 'project')  AS scope,
+             COALESCE(me.confidence, 1.0)   AS confidence,
+             COALESCE(me.pinned, 0)          AS pinned,
+             bm25(memory_fts) - (COALESCE(me.pinned, 0) * 5.0) AS adjusted_score
       FROM memory_fts
       INNER JOIN memory_entries me ON me.id = memory_fts.rowid
       WHERE memory_fts MATCH ?
-      ORDER BY bm25(memory_fts)
+        AND COALESCE(me.confidence, 1.0) >= 0.50
+        AND COALESCE(me.scope, 'project') IN ('project', 'user')
+      ORDER BY adjusted_score ASC
       LIMIT 10
     `);
+    // Catatan scope filter:
+    // 'project' = memory untuk project ini (default, cross-session dalam project)
+    // 'user'    = memory preferensi personal user (cross-project)
+    // 'session' = DIKECUALIKAN — hanya relevan selama session berjalan, tidak boleh bocor ke sesi lain
 
     try {
       const rawFiles  = fileSearch.all(safeQuery)  as Array<any>;
@@ -339,25 +370,53 @@ export class Indexer {
   }
 
   /**
-   * Sanitize query untuk FTS5.
-   * Menghapus karakter khusus dan memformat query sebagai prefix search.
+   * Sanitize query untuk FTS5 dengan stopwords dan AND untuk strong terms.
+   *
+   * Strategi:
+   * - Hapus stopwords (kata pendek dan sangat umum)
+   * - Strong terms (≥4 karakter) digabung dengan AND → precision tinggi
+   * - Weak terms (2–3 karakter, bukan stopword) digabung dengan OR → recall
+   * - Kombinasi: (strong AND) OR (weak OR)
+   *
+   * Contoh:
+   *   Input : "fix bug in auth.ts"
+   *   Output: "fix* AND auth* AND ts* OR bug*"
+   *   Hasil : Entry yang mengandung "auth" dan "ts" diprioritaskan
    */
   private sanitizeFtsQuery(query: string): string {
+    const STOPWORDS = new Set([
+      // Inggris
+      'in', 'on', 'at', 'to', 'of', 'the', 'a', 'an', 'is', 'are', 'was',
+      'be', 'by', 'do', 'if', 'or', 'as', 'it', 'he', 'we', 'my', 'up',
+      // Indonesia
+      'di', 'ke', 'dari', 'yang', 'dan', 'atau', 'ini', 'itu', 'ada', 'untuk',
+      'jika', 'jadi', 'bisa', 'agar', 'saat', 'cara',
+    ]);
+
     const sanitized = query
-      .replace(/["'`]/g, ' ')           // hapus kutip
-      .replace(/[(){}[\]^~*:!]/g, ' ')  // hapus operator FTS
+      .toLowerCase()
+      .replace(/["'`]/g, ' ')
+      .replace(/[(){}[\]^~*:!]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
 
     if (!sanitized) return '';
 
-    const terms = sanitized
+    const words = sanitized
       .split(' ')
-      .filter(t => t.length >= 2)
-      .map(t => `${t}*`)
-      .join(' OR ');
+      .filter(w => w.length >= 2 && !STOPWORDS.has(w));
 
-    return terms || '';
+    if (words.length === 0) return '';
+
+    // Strong terms (≥4 char) → AND → precision
+    const strong = words.filter(w => w.length >= 4).map(w => `${w}*`);
+    // Weak terms (2–3 char, sudah lewat stopwords) → OR → soft recall
+    const weak   = words.filter(w => w.length < 4).map(w => `${w}*`);
+
+    const strongQuery = strong.join(' AND ');
+    const weakQuery   = weak.join(' OR ');
+
+    return [strongQuery, weakQuery].filter(Boolean).join(' OR ');
   }
 
   /**

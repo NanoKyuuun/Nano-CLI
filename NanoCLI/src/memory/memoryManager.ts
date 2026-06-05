@@ -10,6 +10,7 @@ import { ConfigManager } from '../files/configManager';
 import { isSensitiveFile } from '../files/sensitiveFileBlocker';
 import { HomeServerClient } from '../remote/homeServerClient';
 import { SecretRedactor } from '../security/secretRedactor';
+import { FileWatcher } from './fileWatcher';
 
 /**
  * Extension allowlist untuk memory indexing.
@@ -36,6 +37,8 @@ export class MemoryManager {
   /** Lazy-initialized — null berarti belum dicek atau tidak terkonfigurasi */
   private homeClient: HomeServerClient | null | undefined = undefined;
   private redactor = new SecretRedactor();
+  /** P2-04: Auto-index watcher — null jika tidak aktif */
+  private watcher: FileWatcher | null = null;
 
   constructor(projectRoot: string = process.cwd()) {
     this.projectRoot = projectRoot;
@@ -213,6 +216,85 @@ export class MemoryManager {
     } finally {
       this.indexer.close();
     }
+  }
+
+  /**
+   * P2-04: Aktifkan auto-index watcher.
+   *
+   * Memantau perubahan file di project root dan secara otomatis
+   * menjalankan incremental re-indexing setiap kali file berubah.
+   *
+   * Hanya trigger untuk file yang masuk allowlist extension dan bukan file sensitif.
+   * Debounce 2s untuk mencegah re-index berulang saat rapid file changes.
+   *
+   * @param quiet - jika true, tidak tampilkan notifikasi per perubahan
+   */
+  startWatcher(quiet = true): void {
+    if (this.watcher?.running) return; // sudah aktif
+
+    this.watcher = new FileWatcher(
+      this.projectRoot,
+      async (changedPaths) => {
+        // Jalankan incremental index untuk setiap file yang berubah
+        let indexed = 0;
+        try {
+          await this.indexer.connect();
+          for (const relativePath of changedPaths) {
+            const absolutePath = path.join(this.projectRoot, relativePath);
+
+            // File dihapus — hapus dari index
+            const exists = await fs.pathExists(absolutePath);
+            if (!exists) {
+              this.indexer.removeFileIndex(relativePath);
+              continue;
+            }
+
+            // File ada — re-index
+            let rawBuffer: Buffer;
+            try {
+              rawBuffer = await fs.readFile(absolutePath);
+            } catch { continue; }
+
+            if (rawBuffer.includes(0)) continue; // skip binary
+
+            const content = rawBuffer.toString('utf-8');
+            const hash    = CryptoJS.MD5(content).toString();
+
+            const existing = this.indexer.getFileByPath(relativePath);
+            if (existing?.hash === hash) continue; // tidak berubah
+
+            const summary = this.buildHeuristicSummary(relativePath, content);
+            this.indexer.updateFileIndex({ path: relativePath, hash, summary, lastIndexed: Date.now() });
+            indexed++;
+          }
+        } catch { /* quiet */ } finally {
+          this.indexer.close();
+        }
+
+        if (!quiet && indexed > 0) {
+          Renderer.printStatus(`[Watcher] ${indexed} file diindeks ulang.`, 'info');
+        }
+      },
+    );
+
+    this.watcher.start();
+  }
+
+  /**
+   * P2-04: Hentikan auto-index watcher.
+   */
+  async stopWatcher(): Promise<void> {
+    if (this.watcher) {
+      await this.watcher.stop();
+      this.watcher = null;
+    }
+  }
+
+  /**
+   * Status watcher aktif atau tidak.
+   */
+  get watcherRunning(): boolean {
+    return this.watcher?.running ?? false;
   }
 
   async searchMemory(query: string): Promise<void> {

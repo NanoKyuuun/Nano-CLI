@@ -25,6 +25,7 @@
  */
 
 import { z } from 'zod';
+import JSON5 from 'json5';
 import { AgentAction, ParsedToolCall } from './agentTypes';
 
 // ─── Zod Schemas ─────────────────────────────────────────────────────────────
@@ -97,11 +98,20 @@ export class ToolRouter {
       if (block.lang !== 'json') continue;
 
       // Coba parse JSON dari block ini
+      // P2-06: Gunakan JSON.parse dulu (strict), lalu fallback ke JSON5 (toleran).
+      // JSON5 lebih tahan terhadap output LLM yang memiliki:
+      // - trailing comma  : {"key": "val",}
+      // - komentar inline : {/* type */ "type": "file.write"}
+      // - single-quote    : {'type': 'terminal.run'}
       let parsed: unknown;
       try {
         parsed = JSON.parse(block.content);
       } catch {
-        continue; // bukan JSON valid, lanjut ke block berikutnya
+        try {
+          parsed = JSON5.parse(block.content);
+        } catch {
+          continue; // bukan JSON/JSON5 valid, lanjut ke block berikutnya
+        }
       }
 
       // Validasi schema

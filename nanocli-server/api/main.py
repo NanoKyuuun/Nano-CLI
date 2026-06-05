@@ -51,8 +51,21 @@ logging.basicConfig(
 logger = logging.getLogger("nanocli-api")
 
 API_KEY = os.environ.get("API_KEY", "")
+NANOCLI_DEV_MODE = os.environ.get("NANOCLI_DEV_MODE", "false").lower() == "true"
+
 if not API_KEY:
-    logger.warning("API_KEY env var tidak di-set! Server berjalan tanpa autentikasi.")
+    if NANOCLI_DEV_MODE:
+        logger.warning(
+            "[DEV MODE] API_KEY tidak di-set. "
+            "Server berjalan TANPA autentikasi. "
+            "JANGAN gunakan ini di production."
+        )
+    else:
+        raise RuntimeError(
+            "API_KEY environment variable wajib diset untuk menjalankan NanoCLI API server. "
+            "Set API_KEY=<secret> di environment atau docker-compose.yml. "
+            "Untuk development lokal tanpa auth, set NANOCLI_DEV_MODE=true (tidak untuk production)."
+        )
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 

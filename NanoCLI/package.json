@@ -1,20 +1,53 @@
 {
   "name": "nanocli",
   "version": "1.0.0",
-  "description": "",
+  "description": "Terminal-first AI coding assistant with project memory, agent mode, and multi-model support via OpenRouter",
   "main": "dist/main.js",
   "bin": {
     "nanocli": "dist/main.js"
   },
+  "files": [
+    "dist/",
+    "README.md",
+    "INSTALL.md",
+    "SECURITY.md",
+    ".env.example"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run check && npm run build",
     "start": "ts-node src/main.ts",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run test"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "ai",
+    "cli",
+    "coding-assistant",
+    "openrouter",
+    "llm",
+    "terminal",
+    "agent",
+    "memory",
+    "rag",
+    "typescript"
+  ],
+  "author": "NanoKyuuun",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NanoKyuuun/Nano-CLI.git"
+  },
+  "homepage": "https://github.com/NanoKyuuun/Nano-CLI#readme",
+  "bugs": {
+    "url": "https://github.com/NanoKyuuun/Nano-CLI/issues"
+  },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/crypto-js": "^4.2.2",
@@ -25,12 +58,14 @@
     "@types/node": "^25.8.0",
     "@types/sqlite3": "^3.1.11",
     "ts-node": "^10.9.2",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
   },
   "dependencies": {
     "axios": "^1.16.1",
     "better-sqlite3": "^12.10.0",
     "chalk": "^4.1.2",
+    "chokidar": "^5.0.0",
     "cli-table3": "^0.6.5",
     "commander": "^14.0.3",
     "crypto-js": "^4.2.0",
@@ -40,6 +75,7 @@
     "glob": "^13.0.6",
     "ignore": "^7.0.5",
     "js-tiktoken": "^1.0.21",
+    "json5": "^2.2.3",
     "marked": "^4.3.0",
     "marked-terminal": "^5.0.0",
     "zod": "^4.4.3"

@@ -99,6 +99,19 @@ export class ChatUI {
       const remoteConfig = await this.configManager.getRemoteConfig();
       if (remoteConfig?.url && remoteConfig?.apiKey) {
         this.homeClient = new HomeServerClient(remoteConfig.url, remoteConfig.apiKey);
+
+        // P1-05: Cek availability backend sekali saat startup.
+        // Jika tidak tersedia, tampilkan pesan satu kali dan fallback ke lokal.
+        // Tidak throw — CLI tetap berjalan penuh dengan SQLite FTS5 lokal.
+        const backendAvailable = await this.homeClient.isAvailable();
+        if (!backendAvailable) {
+          Renderer.printStatus(
+            'Semantic backend tidak tersedia. Menggunakan SQLite FTS5 lokal sebagai fallback. ' +
+            'Pastikan nanocli-server berjalan dan API_KEY sudah diset.',
+            'warn',
+          );
+          this.homeClient = null; // matikan client agar tidak ada retry di setiap query
+        }
       }
       this.telemetryClient = null;
     } else if (this.nanoMode === 'share') {
@@ -124,6 +137,11 @@ export class ChatUI {
     this.messages = [{ role: 'system', content: systemPrompt }];
 
     await this.displayWelcome();
+
+    // P2-04: Aktifkan auto-index watcher di background (quiet mode).
+    // Watcher memantau perubahan file dan re-index secara inkremental.
+    // Tidak ada output per perubahan agar tidak ganggu chat.
+    this.memoryManager.startWatcher(true);
 
     // ─── SIGINT handler (Ctrl+C) context-aware ─────────────────────
     // process.once agar tidak terdaftar berkali-kali jika startChat() dipanggil ulang.
@@ -334,7 +352,9 @@ export class ChatUI {
           if (modelMetadataForCost) {
             const inputTok  = this.tokenManager.countMessageTokens(messagesToSend);
             const outputTok = this.tokenManager.countTextTokens(fullResponse);
-            responseCostUsd = this.tokenManager.estimateCost(inputTok, modelMetadataForCost.pricing, outputTok);
+            const costResult = this.tokenManager.estimateCost(inputTok, modelMetadataForCost.pricing, outputTok);
+            // null = pricing tidak diketahui — jangan tampilkan angka palsu
+            responseCostUsd = costResult ?? undefined;
           }
 
           // Response frame: tampilkan footer dengan timing + cost
@@ -400,6 +420,9 @@ export class ChatUI {
       });
     }
 
+    // P2-04: Hentikan file watcher
+    await this.memoryManager.stopWatcher();
+
     console.log(chalk.yellow('\nSesi chat berakhir. Sampai jumpa!'));
   }
 
@@ -407,17 +430,18 @@ export class ChatUI {
     const modelMetadata = await this.modelManager.getModel(this.currentModelId);
     if (!modelMetadata) return;
 
-    const inputTokens = this.tokenManager.countMessageTokens(inputMessages);
+    const inputTokens  = this.tokenManager.countMessageTokens(inputMessages);
     const outputTokens = this.tokenManager.countTextTokens(outputText);
-    const costUsd = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, outputTokens);
+    const costUsd      = this.tokenManager.estimateCost(inputTokens, modelMetadata.pricing, outputTokens);
 
+    // Hanya log jika cost diketahui — jangan simpan cost palsu ke stats
     await this.statsManager.logUsage({
       timestamp: Date.now(),
-      modelId: this.currentModelId,
-      mode: this.currentMode,
+      modelId:   this.currentModelId,
+      mode:      this.currentMode,
       inputTokens,
       outputTokens,
-      costUsd
+      costUsd: costUsd ?? 0,   // 0 = unknown, dibedakan dari NaN/negatif
     });
   }
 
@@ -715,6 +739,9 @@ export class ChatUI {
 
     const threshold = 0.05;
     const isHighMode = this.currentMode === 'high' || this.currentMode === 'extra-high';
+
+    // null = pricing tidak diketahui — tidak bisa guard, izinkan lanjut
+    if (estimatedCost === null) return true;
 
     if (estimatedCost > threshold || (isHighMode && estimatedCost > 0.01)) {
       console.log(chalk.yellow('\n⚠️  Peringatan Biaya:'));
@@ -1231,12 +1258,11 @@ export class ChatUI {
       const chatMessages = this.messages.filter(m => m.role === 'user' || m.role === 'assistant');
       if (chatMessages.length < 2) return;
 
-      console.log('');
-      Renderer.printStatus(`Memory Extraction — menganalisis ${chatMessages.length} pesan...`, 'info');
+      // P1-06: Quiet extraction — tidak tampilkan loading message agar exit terasa bersih.
+      // Proses berjalan di background, user hanya melihat ringkasan akhir.
 
       // 3. Jalankan extractor
       const fastModelId = await this.configManager.getModelForMode('fast');
-      console.log(chalk.dim(`  Model: ${fastModelId}`));
 
       const extractor = new MemoryExtractor();
       const candidates = await extractor.extract({
@@ -1245,22 +1271,7 @@ export class ChatUI {
         messages: this.messages,
       });
 
-      if (candidates.length === 0) {
-        console.log(chalk.dim('  [Memory] LLM tidak menemukan preferensi yang layak disimpan dari sesi ini.'));
-        console.log('');
-        return;
-      }
-
-      // Tampilkan semua kandidat yang diekstrak LLM
-      console.log(chalk.cyan(`\n  [Memory] LLM menemukan ${candidates.length} kandidat:`));
-      for (const c of candidates) {
-        const confBar = c.confidence >= 0.80 ? chalk.green('▓▓▓') :
-                        c.confidence >= 0.65 ? chalk.yellow('▓▓░') : chalk.dim('▓░░');
-        console.log(
-          `    ${confBar} [${chalk.yellow(c.type)}/${c.scope}] conf=${chalk.cyan(c.confidence.toFixed(2))}\n` +
-          `       "${chalk.white(c.content.slice(0, 80))}${c.content.length > 80 ? '...' : ''}"`
-        );
-      }
+      if (candidates.length === 0) return; // Tidak ada kandidat — exit tanpa noise
 
       // 4. Ambil existing entries untuk deduplication
       const existing = await this.memoryManager.listMemoryEntries(100);
@@ -1269,10 +1280,8 @@ export class ChatUI {
       );
 
       let saved = 0;
-      let skippedDup = 0;
       let conflicts = 0;
 
-      console.log('');
       for (const candidate of candidates) {
         const candidateNorm = candidate.content.toLowerCase().replace(/\s+/g, ' ').trim();
 
@@ -1285,13 +1294,9 @@ export class ChatUI {
                  (shorter.length > 20 && longer.includes(shorter.slice(0, Math.floor(shorter.length * 0.8))));
         });
 
-        if (isDuplicate) {
-          console.log(chalk.dim(`  [Memory] SKIP (duplikat): "${candidate.content.slice(0, 60)}..."`));
-          skippedDup++;
-          continue;
-        }
+        if (isDuplicate) continue; // Skip duplikat tanpa noise
 
-        // Conflict detection
+        // Conflict detection (silent — hanya increment counter)
         const sameTypeScopeEntries = existing.filter(
           e => e.type === candidate.type && e.scope === (candidate.scope ?? 'project')
         );
@@ -1300,10 +1305,7 @@ export class ChatUI {
           const possibleConflict = sameTypeScopeEntries.some(e =>
             topicWords.some(word => e.content.toLowerCase().includes(word))
           );
-          if (possibleConflict) {
-            conflicts++;
-            console.log(chalk.yellow(`  [Memory] ⚠ Potensi konflik preferensi — tetap disimpan, cek /memory review`));
-          }
+          if (possibleConflict) conflicts++;
         }
 
         // Simpan ke SQLite
@@ -1315,35 +1317,17 @@ export class ChatUI {
           source:     'chat_extractor',
           confidence: candidate.confidence,
         });
-
-        console.log(chalk.green(`  [Memory] ✓ SAVED: "${candidate.content.slice(0, 70)}${candidate.content.length > 70 ? '...' : ''}"`));
         saved++;
       }
 
-      console.log('');
-
-      // Ringkasan
+      // Ringkasan satu baris — hanya jika ada yang disimpan
       if (saved > 0) {
-        Renderer.printStatus(
-          `Memory: ${saved} preferensi disimpan, ${skippedDup} duplikat dilewati.`,
-          'success'
-        );
-      } else {
-        Renderer.printStatus(
-          `Memory: Semua kandidat dilewati (duplikat). Database sudah up-to-date.`,
-          'info'
-        );
-      }
-
-      if (conflicts > 0) {
-        Renderer.printStatus(
-          `[Memory] Terdeteksi ${conflicts} potensi konflik. Jalankan /memory review.`,
-          'warn'
-        );
+        const conflictNote = conflicts > 0 ? ` (${conflicts} potensi konflik — cek /memory review)` : '';
+        Renderer.printStatus(`Memory: ${saved} entri baru disimpan.${conflictNote}`, 'success');
       }
 
     } catch (err: any) {
-      // Tampilkan error agar user tahu kenapa tidak ada yang tersimpan
+      // Quiet error — tidak tampilkan stack trace saat exit
       Renderer.printStatus(`[Memory] Extraction gagal: ${err?.message ?? 'unknown error'}`, 'warn');
     }
   }

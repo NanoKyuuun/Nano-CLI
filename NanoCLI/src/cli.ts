@@ -22,6 +22,8 @@ import { WriteCommand } from './commands/write';
 import { GenerateCommand } from './commands/generate';
 import { UndoCommand } from './commands/undo';
 import { AgentCommand } from './commands/agent';
+import { GitManager } from './git/gitManager';
+import { DoctorCommand } from './commands/doctor';
 
 const program = new Command();
 const configManager = new ConfigManager();
@@ -224,6 +226,7 @@ program
   .option('--permission <level>', 'Level permission: workspace | full', 'workspace')
   .option('--dry-run', 'Tampilkan proposal tanpa eksekusi')
   .option('--verbose', 'Tampilkan output detail setiap step')
+  .option('--batch-approve', 'P2-01: Approve semua actions sekaligus (tidak ada interrupt per-action)')
   .action(async (task, options, cmd) => {
     await checkOnboarding(cmd);
     await agentCommand.execute(task, options);
@@ -614,6 +617,124 @@ data
     }
 
     console.log('');
+  });
+
+// ─── Git Command (P2-03) ─────────────────────────────────────────────────────
+
+const gitCommand = program
+  .command('git')
+  .description('Integrasi git minimal — status, diff, checkpoint, log');
+
+gitCommand
+  .command('status')
+  .description('Tampilkan status repository (staged, unstaged, untracked)')
+  .action(async () => {
+    const git = new GitManager();
+    if (!git.isRepo()) {
+      Renderer.printStatus('Bukan git repository. Jalankan `git init` terlebih dahulu.', 'error');
+      return;
+    }
+    const result = git.status();
+    console.log('');
+    console.log(chalk.bold.cyan('  Git Status'));
+    console.log(chalk.cyan('  ' + '─'.repeat(40)));
+    console.log(result.output.split('\n').map(l => '  ' + l).join('\n'));
+    console.log('');
+  });
+
+gitCommand
+  .command('diff')
+  .description('Tampilkan diff perubahan saat ini')
+  .option('--staged', 'Tampilkan diff yang sudah di-stage')
+  .option('-f, --file <path>', 'Batasi diff ke file tertentu')
+  .action(async (opts) => {
+    const git = new GitManager();
+    if (!git.isRepo()) {
+      Renderer.printStatus('Bukan git repository.', 'error');
+      return;
+    }
+    const result = git.diff(opts.staged ?? false, opts.file);
+    if (!result.success) {
+      Renderer.printStatus(`Git diff gagal: ${result.error}`, 'error');
+      return;
+    }
+    if (!result.output.trim()) {
+      console.log(chalk.dim('  Tidak ada perubahan untuk ditampilkan.'));
+      return;
+    }
+    // Syntax highlight sederhana: + hijau, - merah
+    const colored = result.output.split('\n').map(line => {
+      if (line.startsWith('+') && !line.startsWith('+++')) return chalk.green(line);
+      if (line.startsWith('-') && !line.startsWith('---')) return chalk.red(line);
+      if (line.startsWith('@@')) return chalk.cyan(line);
+      return chalk.dim(line);
+    }).join('\n');
+    console.log('\n' + colored);
+  });
+
+gitCommand
+  .command('checkpoint [message]')
+  .description('Commit semua perubahan (git add -A && git commit)')
+  .action(async (message?: string) => {
+    const git  = new GitManager();
+    if (!git.isRepo()) {
+      Renderer.printStatus('Bukan git repository.', 'error');
+      return;
+    }
+
+    const status = git.status();
+    if (status.parsed?.clean) {
+      Renderer.printStatus('Working tree bersih — tidak ada yang perlu di-commit.', 'info');
+      return;
+    }
+
+    const msg    = message ?? `checkpoint: nanocli auto-commit ${new Date().toISOString().slice(0, 16)}`;
+    Renderer.printStatus(`Membuat checkpoint: "${msg}"`, 'info');
+
+    const result = git.checkpoint(msg);
+    if (result.success) {
+      Renderer.printStatus('Checkpoint berhasil dibuat.', 'success');
+      console.log(chalk.dim(result.output));
+    } else {
+      Renderer.printStatus(`Checkpoint gagal: ${result.error}`, 'error');
+    }
+  });
+
+gitCommand
+  .command('log')
+  .description('Tampilkan N commit terakhir')
+  .option('-n, --count <n>', 'Jumlah commit', '10')
+  .action(async (opts) => {
+    const git = new GitManager();
+    if (!git.isRepo()) {
+      Renderer.printStatus('Bukan git repository.', 'error');
+      return;
+    }
+    const n      = parseInt(opts.count, 10);
+    const result = git.log(n);
+    if (!result.success) {
+      Renderer.printStatus(`Git log gagal: ${result.error}`, 'error');
+      return;
+    }
+    console.log('');
+    console.log(chalk.bold.cyan('  Git Log (last ' + n + ')'));
+    console.log(chalk.cyan('  ' + '─'.repeat(40)));
+    result.output.split('\n').filter(Boolean).forEach(line => {
+      const [hash, ...rest] = line.split(' ');
+      console.log(`  ${chalk.yellow(hash ?? '')} ${rest.join(' ')}`);
+    });
+    console.log('');
+  });
+
+// ─── Doctor Command (P3-02) ────────────────────────────────────────────
+
+program
+  .command('doctor')
+  .description('Self-diagnostic — periksa status semua komponen NanoCLI')
+  .action(async () => {
+    // doctor tidak membutuhkan API key — bisa dijalankan sebelum setup
+    const doctor = new DoctorCommand();
+    await doctor.run();
   });
 
 

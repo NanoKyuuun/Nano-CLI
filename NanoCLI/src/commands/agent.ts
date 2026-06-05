@@ -47,6 +47,8 @@ export class AgentCommand {
       permission: options.permission ?? 'workspace',
       dryRun: options.dryRun ?? false,
       verbose: options.verbose ?? false,
+      // P2-01: Batch approval — user approve sekali untuk semua actions
+      batchApprove: options.batchApprove ?? false,
     };
 
     try {
